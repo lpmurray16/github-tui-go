@@ -206,11 +206,11 @@ func New() Model {
 	log := viewport.New(50, 18)
 	log.SetContent("Starting github-tui-go…")
 
-	return Model{status: status, branchList: branches, projectList: projects, input: input, spinner: spin, log: log, message: "Loading repository and GitHub account…"}
+	return Model{status: status, branchList: branches, projectList: projects, input: input, spinner: spin, log: log, busy: true, message: "Loading repository and GitHub account…"}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(loadCmd("", refreshAll), m.spinner.Tick)
+	return tea.Batch(loadCmd("", refreshAll), m.spinner.Tick, tea.EnableReportFocus)
 }
 
 func loadCmd(start string, scope refreshScope) tea.Cmd {
@@ -282,6 +282,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.resize()
+	case tea.FocusMsg:
+		if m.busy || m.repo == nil || m.mode != modeNormal {
+			break
+		}
+		m.busy = true
+		m.message = "Refreshing active project after focus returned…"
+		m.refreshPending = true
+		return m, loadCmd(m.activePath(), refreshRepository)
 	case startupMsg:
 		m.busy = false
 		if msg.repositoryLoaded {

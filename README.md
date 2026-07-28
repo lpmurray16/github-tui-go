@@ -14,6 +14,7 @@ A keyboard-driven Git and GitHub terminal interface built with Go, Bubble Tea, L
 - Fetches the latest `master`, then creates and checks out a working branch from it
 - Updates the working branch from `origin/master`, falling back to `origin/main`
 - Automatically refreshes only the affected repository, workspace, or account state after actions, avoiding unnecessary sibling-project scans and GitHub API calls
+- Automatically refreshes the active repository when its terminal window regains focus, picking up edits made in external tools
 - Opens GitHub's pull request form in your browser for final review
 - Stashes tracked/untracked changes and pops the latest stash
 - Checks out existing local branches
