@@ -1,6 +1,7 @@
 package gitops
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -36,6 +37,65 @@ type Project struct {
 	Path   string
 	Branch string
 	Dirty  bool
+}
+
+const maxDiffPreviewBytes = 200_000
+
+func (r *Repository) FileDiff(file FileStatus) (string, error) {
+	path := filepath.ToSlash(filepath.Clean(file.Path))
+	if path == "." || strings.HasPrefix(path, "../") || filepath.IsAbs(path) {
+		return "", fmt.Errorf("invalid repository path %q", path)
+	}
+	if file.Worktree == git.Untracked {
+		untracked, err := os.Open(filepath.Join(r.Root, filepath.FromSlash(path)))
+		if err != nil {
+			return "", fmt.Errorf("open untracked file: %w", err)
+		}
+		defer untracked.Close()
+		contents, err := io.ReadAll(io.LimitReader(untracked, maxDiffPreviewBytes+1))
+		if err != nil {
+			return "", fmt.Errorf("read untracked file: %w", err)
+		}
+		if bytes.IndexByte(contents, 0) >= 0 {
+			return "Binary file — preview unavailable", nil
+		}
+		lines := strings.Split(string(contents), "\n")
+		for index := range lines {
+			lines[index] = "+" + lines[index]
+		}
+		return truncateDiff(fmt.Sprintf("new file: %s\n--- /dev/null\n+++ b/%s\n@@ new file @@\n%s", path, path, strings.Join(lines, "\n"))), nil
+	}
+
+	sections := make([]string, 0, 2)
+	if file.Staging != git.Unmodified {
+		output, err := r.gitOutput("diff", "--cached", "--no-ext-diff", "--no-color", "--", path)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(output) != "" {
+			sections = append(sections, "STAGED CHANGES\n"+output)
+		}
+	}
+	if file.Worktree != git.Unmodified {
+		output, err := r.gitOutput("diff", "--no-ext-diff", "--no-color", "--", path)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(output) != "" {
+			sections = append(sections, "WORKTREE CHANGES\n"+output)
+		}
+	}
+	if len(sections) == 0 {
+		return "No textual diff available for this file.", nil
+	}
+	return truncateDiff(strings.Join(sections, "\n\n")), nil
+}
+
+func truncateDiff(diff string) string {
+	if len(diff) <= maxDiffPreviewBytes {
+		return diff
+	}
+	return diff[:maxDiffPreviewBytes] + "\n\n… diff preview truncated …"
 }
 
 func DiscoverProjects(root string) ([]Project, error) {
@@ -308,18 +368,23 @@ func (r *Repository) PopStash() error {
 	return r.runGit("stash", "pop")
 }
 
-func (r *Repository) runGit(args ...string) error {
+func (r *Repository) gitOutput(args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = r.Root
 	output, err := cmd.CombinedOutput()
 	if err == nil {
-		return nil
+		return string(output), nil
 	}
 	detail := strings.TrimSpace(string(output))
 	if detail == "" {
 		detail = strings.Join(args, " ")
 	}
-	return fmt.Errorf("%s: %w", detail, err)
+	return "", fmt.Errorf("%s: %w", detail, err)
+}
+
+func (r *Repository) runGit(args ...string) error {
+	_, err := r.gitOutput(args...)
+	return err
 }
 
 func (r *Repository) DiscardAll() error {

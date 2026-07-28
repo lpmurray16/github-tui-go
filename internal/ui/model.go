@@ -136,6 +136,12 @@ type operationMsg struct {
 
 type authLoginMsg struct{ err error }
 type setupInstallMsg struct{ err error }
+type fileDiffMsg struct {
+	root    string
+	path    string
+	content string
+	err     error
+}
 
 type Model struct {
 	width, height  int
@@ -155,6 +161,7 @@ type Model struct {
 	branchList     list.Model
 	projectList    list.Model
 	log            viewport.Model
+	preview        viewport.Model
 	input          textinput.Model
 	spinner        spinner.Model
 	publishName    string
@@ -165,6 +172,8 @@ type Model struct {
 	tools          preflight.Result
 	setupRestart   bool
 	setupCommand   string
+	previewRoot    string
+	previewPath    string
 }
 
 func New() Model {
@@ -205,8 +214,10 @@ func New() Model {
 
 	log := viewport.New(50, 18)
 	log.SetContent("Starting github-tui-go…")
+	preview := viewport.New(50, 18)
+	preview.SetContent("Select a changed file to preview its diff.")
 
-	return Model{status: status, branchList: branches, projectList: projects, input: input, spinner: spin, log: log, busy: true, message: "Loading repository and GitHub account…"}
+	return Model{status: status, branchList: branches, projectList: projects, input: input, spinner: spin, log: log, preview: preview, busy: true, message: "Loading repository and GitHub account…"}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -298,6 +309,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setFiles(msg.files)
 			m.setBranches(msg.branches)
 			m.updateActiveProject(msg.files)
+			if cmd := m.selectedDiffCmd(); cmd != nil {
+				m.preview.SetContent(sectionTitle("DIFF PREVIEW") + "\n\n" + dimStyle.Render("Loading selected file…"))
+				cmds = append(cmds, cmd)
+			} else {
+				m.previewRoot, m.previewPath = "", ""
+				m.preview.SetContent("Select a changed file to preview its diff.")
+			}
 		}
 		if msg.workspaceLoaded {
 			m.projectsRoot, m.projects, m.configErr = msg.projectsRoot, msg.projects, msg.configErr
@@ -360,6 +378,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = "Installation finished — restart github-tui-go so PATH changes take effect"
 		}
 		m.updateLog()
+	case fileDiffMsg:
+		if m.repo == nil || !strings.EqualFold(filepath.Clean(m.repo.Root), filepath.Clean(msg.root)) {
+			break
+		}
+		selected, ok := m.status.SelectedItem().(fileItem)
+		if !ok || selected.file.Path != msg.path {
+			break
+		}
+		m.previewRoot, m.previewPath = msg.root, msg.path
+		if msg.err != nil {
+			m.preview.SetContent(sectionTitle("DIFF PREVIEW") + "\n\n" + errorStyle.Render(msg.err.Error()))
+		} else {
+			m.preview.SetContent(sectionTitle("DIFF PREVIEW") + "\n" + dimStyle.Render(msg.path) + "\n\n" + renderDiff(msg.content))
+		}
+		m.preview.GotoTop()
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -385,6 +418,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "f1":
 			m.mode = modeSetup
 			m.message = "Setup and prerequisites"
+		case "[":
+			m.preview.LineUp(6)
+		case "]":
+			m.preview.LineDown(6)
 		case "r":
 			m.busy, m.message = true, "Refreshing active project…"
 			m.refreshPending = true
@@ -479,9 +516,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.mode == modeNormal {
+		before := m.selectedStatusPath()
 		var cmd tea.Cmd
 		m.status, cmd = m.status.Update(msg)
 		cmds = append(cmds, cmd)
+		if after := m.selectedStatusPath(); after != before {
+			if cmd := m.selectedDiffCmd(); cmd != nil {
+				m.preview.SetContent(sectionTitle("DIFF PREVIEW") + "\n\n" + dimStyle.Render("Loading selected file…"))
+				m.preview.GotoTop()
+				cmds = append(cmds, cmd)
+			}
+		}
 	} else if m.mode == modeCheckout {
 		var cmd tea.Cmd
 		m.branchList, cmd = m.branchList.Update(msg)
@@ -693,6 +738,47 @@ func operationCmd(label string, refresh refreshScope, fn func() error) tea.Cmd {
 	return func() tea.Msg { return operationMsg{label: label, err: fn(), refresh: refresh} }
 }
 
+func (m Model) selectedStatusPath() string {
+	if item, ok := m.status.SelectedItem().(fileItem); ok {
+		return item.file.Path
+	}
+	return ""
+}
+
+func (m Model) selectedDiffCmd() tea.Cmd {
+	if m.repo == nil {
+		return nil
+	}
+	item, ok := m.status.SelectedItem().(fileItem)
+	if !ok {
+		return nil
+	}
+	repo, root, file := m.repo, m.repo.Root, item.file
+	return func() tea.Msg {
+		content, err := repo.FileDiff(file)
+		return fileDiffMsg{root: root, path: file.Path, content: content, err: err}
+	}
+}
+
+func renderDiff(diff string) string {
+	lines := strings.Split(diff, "\n")
+	for index, line := range lines {
+		switch {
+		case line == "STAGED CHANGES", line == "WORKTREE CHANGES":
+			lines[index] = titleStyle.Render(line)
+		case strings.HasPrefix(line, "@@"):
+			lines[index] = accentStyle.Render(line)
+		case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
+			lines[index] = lipgloss.NewStyle().Foreground(green).Render(line)
+		case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
+			lines[index] = errorStyle.Render(line)
+		case strings.HasPrefix(line, "diff --git"), strings.HasPrefix(line, "index "), strings.HasPrefix(line, "---"), strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "new file"):
+			lines[index] = dimStyle.Render(line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m *Model) openInput(next mode, prompt, placeholder, value string) tea.Cmd {
 	m.mode = next
 	m.input.Prompt = prompt + ": "
@@ -778,6 +864,7 @@ func (m *Model) resize() {
 	m.branchList.SetSize(leftWidth-4, bodyHeight-2)
 	m.projectList.SetSize(leftWidth-4, bodyHeight-2)
 	m.log.Width, m.log.Height = rightWidth-4, bodyHeight-2
+	m.preview.Width, m.preview.Height = rightWidth-4, bodyHeight-2
 	m.input.Width = max(20, m.width-24)
 	m.updateLog()
 }
@@ -839,7 +926,7 @@ func (m *Model) updateLog() {
 	}
 
 	if m.showHelp {
-		help, err := glamour.Render("## Workspace\n\n- `Tab` switch projects\n- `W` set or change projects root\n\n## Daily workflow\n\n- `g` / `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update from origin/master, then origin/main\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `0` log in or log out of GitHub\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `r` refresh active project\n- `R` refresh everything\n- `F1` reopen setup\n- `q` quit\n", "dark")
+		help, err := glamour.Render("## Workspace\n\n- `Tab` switch projects\n- `W` set or change projects root\n\n## Daily workflow\n\n- `g` / `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update from origin/master, then origin/main\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `0` log in or log out of GitHub\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `r` refresh active project\n- `R` refresh everything\n- `F1` reopen setup\n- `[` / `]` scroll diff preview\n- `q` quit\n", "dark")
 		if err == nil {
 			lines = append(lines, "", help)
 		}
@@ -878,7 +965,11 @@ func (m Model) View() string {
 		left = m.cleanState(leftWidth-4, bodyHeight-2)
 	}
 	left = panelStyle.Width(leftWidth).Height(bodyHeight).Render(left)
-	right := detailStyle.Width(rightWidth).Height(bodyHeight).Render(m.log.View())
+	rightContent := m.log.View()
+	if !m.showHelp && m.mode != modeCheckout && m.mode != modeProjectSwitch && m.selectedStatusPath() != "" {
+		rightContent = m.preview.View()
+	}
+	right := detailStyle.Width(rightWidth).Height(bodyHeight).Render(rightContent)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
 
 	activity := m.message
@@ -909,6 +1000,7 @@ func (m Model) View() string {
 			shortcut("p", "Push"),
 			shortcut("P", "PR"),
 			shortcut("r", "Refresh"),
+			shortcut("[/]", "Diff scroll"),
 			shortcut("?", "Help"),
 		}
 		if !m.hasOrigin {

@@ -9,6 +9,7 @@ A keyboard-driven Git and GitHub terminal interface built with Go, Bubble Tea, L
 - Saves a configurable projects-root directory and switches between sibling Git repositories without leaving the TUI
 - Detects a missing `origin` and publishes the local project to a public or private GitHub repository
 - Shows staged and unstaged status
+- Shows a colorized staged, unstaged, or untracked diff for the selected working-tree file
 - Commits all current changes
 - Pushes the current branch to `origin`
 - Fetches the latest `master`, then creates and checks out a working branch from it
@@ -29,7 +30,7 @@ A keyboard-driven Git and GitHub terminal interface built with Go, Bubble Tea, L
 
 Go is only required when building the application from source; friends using the `.exe` do not need Go installed.
 
-## First-run setup
+## First-run setup (Hopefully works)
 
 On first launch, the setup wizard checks for Git and GitHub CLI and reports the detected paths. If a tool is missing, it prefers winget, falls back to Chocolatey, and otherwise shows the official manual download links. The exact installation command is displayed and requires explicit confirmation before it runs.
 
@@ -64,6 +65,7 @@ Each direct child folder containing a `.git` repository appears in the project s
 | --- | --- |
 | `r` | Quickly refresh the active repository |
 | `R` | Fully rescan the repository, workspace projects, and GitHub account |
+| `[` / `]` | Scroll the selected file's diff preview |
 | `Tab` | Open the searchable project switcher |
 | `W` | Set or change the projects-root directory |
 | `g` / `G` | Publish the project to GitHub and configure `origin` |
