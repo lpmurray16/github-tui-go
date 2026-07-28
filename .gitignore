@@ -1,0 +1,6 @@
+github-tui-go
+github-tui-go.exe
+*.exe
+*.test
+coverage.out
+.DS_Store
