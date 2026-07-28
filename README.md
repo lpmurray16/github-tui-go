@@ -6,6 +6,7 @@ A keyboard-driven Git and GitHub terminal interface built with Go, Bubble Tea, L
 
 - Reuses your existing GitHub CLI login (`gh auth login`)
 - Detects whether the current directory (or a parent) is a Git repository
+- Saves a configurable projects-root directory and switches between sibling Git repositories without leaving the TUI
 - Detects a missing `origin` and publishes the local project to a public or private GitHub repository
 - Shows staged and unstaged status
 - Commits all current changes
@@ -38,13 +39,21 @@ go build -o github-tui-go.exe .
 ./github-tui-go.exe
 ```
 
-If GitHub CLI is not authenticated, press `g` in the TUI to launch `gh auth login`.
+If GitHub CLI is not authenticated, press `0` in the TUI to launch `gh auth login`.
+
+## Projects workspace
+
+Press `W` to enter the directory that contains your project folders. The path is validated and saved in your user config directory under `github-tui-go/config.json`.
+
+Each direct child folder containing a `.git` repository appears in the project switcher. Press `Tab`, type to filter, use the arrow keys, and press `Enter` to switch the active repository. All subsequent Git and GitHub actions target that selected project.
 
 ## Keys
 
 | Key | Action |
 | --- | --- |
 | `r` | Refresh repository and account status |
+| `Tab` | Open the searchable project switcher |
+| `W` | Set or change the projects-root directory |
 | `g` / `G` | Publish the project to GitHub and configure `origin` |
 | `c` | Commit all changes |
 | `p` | Push current branch |

@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	git "github.com/go-git/go-git/v5"
+	"github.com/lpmurray16/github-tui-go/internal/appconfig"
 	"github.com/lpmurray16/github-tui-go/internal/githubauth"
 	"github.com/lpmurray16/github-tui-go/internal/gitops"
 )
@@ -30,6 +31,8 @@ const (
 	modePublishName
 	modePublishConfirm
 	modeLogoutConfirm
+	modeWorkspaceRoot
+	modeProjectSwitch
 	modeCheckout
 	modeDiscardFile
 	modeDiscardAll
@@ -62,15 +65,30 @@ func (i branchItem) Title() string       { return string(i) }
 func (i branchItem) Description() string { return "local branch" }
 func (i branchItem) FilterValue() string { return string(i) }
 
+type projectItem struct{ project gitops.Project }
+
+func (i projectItem) Title() string { return i.project.Name }
+func (i projectItem) Description() string {
+	state := "clean"
+	if i.project.Dirty {
+		state = "changed"
+	}
+	return fmt.Sprintf("%s • %s", i.project.Branch, state)
+}
+func (i projectItem) FilterValue() string { return i.project.Name + " " + i.project.Path }
+
 type startupMsg struct {
-	repo      *gitops.Repository
-	files     []gitops.FileStatus
-	branches  []string
-	branch    string
-	hasOrigin bool
-	account   githubauth.Account
-	repoErr   error
-	authErr   error
+	repo         *gitops.Repository
+	files        []gitops.FileStatus
+	branches     []string
+	branch       string
+	hasOrigin    bool
+	projectsRoot string
+	projects     []gitops.Project
+	account      githubauth.Account
+	repoErr      error
+	authErr      error
+	configErr    error
 }
 
 type operationMsg struct {
@@ -87,12 +105,16 @@ type Model struct {
 	repo          *gitops.Repository
 	repoErr       error
 	authErr       error
+	configErr     error
 	account       githubauth.Account
 	branch        string
 	branches      []string
 	hasOrigin     bool
+	projectsRoot  string
+	projects      []gitops.Project
 	status        list.Model
 	branchList    list.Model
+	projectList   list.Model
 	log           viewport.Model
 	input         textinput.Model
 	spinner       spinner.Model
@@ -117,6 +139,12 @@ func New() Model {
 	branches.SetShowHelp(false)
 	branches.Styles.Title = titleStyle
 
+	projects := list.New(nil, delegate, 46, 18)
+	projects.Title = "Switch project"
+	projects.SetShowHelp(false)
+	projects.SetFilteringEnabled(true)
+	projects.Styles.Title = titleStyle
+
 	input := textinput.New()
 	input.CharLimit = 200
 	input.Width = 60
@@ -130,21 +158,26 @@ func New() Model {
 	log := viewport.New(50, 18)
 	log.SetContent("Starting github-tui-go…")
 
-	return Model{status: status, branchList: branches, input: input, spinner: spin, log: log, message: "Loading repository and GitHub account…"}
+	return Model{status: status, branchList: branches, projectList: projects, input: input, spinner: spin, log: log, message: "Loading repository and GitHub account…"}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(refreshCmd(), m.spinner.Tick)
+	return tea.Batch(loadCmd(""), m.spinner.Tick)
 }
 
-func refreshCmd() tea.Cmd {
+func loadCmd(start string) tea.Cmd {
 	return func() tea.Msg {
 		result := startupMsg{}
-		cwd, err := os.Getwd()
-		if err != nil {
-			result.repoErr = err
-		} else {
-			result.repo, result.repoErr = gitops.Open(cwd)
+		if start == "" {
+			cwd, err := os.Getwd()
+			if err != nil {
+				result.repoErr = err
+			} else {
+				start = cwd
+			}
+		}
+		if result.repoErr == nil {
+			result.repo, result.repoErr = gitops.Open(start)
 		}
 		if result.repoErr == nil {
 			result.files, result.repoErr = result.repo.Status()
@@ -158,9 +191,22 @@ func refreshCmd() tea.Cmd {
 				result.hasOrigin = result.repo.HasOrigin()
 			}
 		}
+		cfg, configErr := appconfig.Load()
+		result.configErr = configErr
+		result.projectsRoot = cfg.ProjectsRoot
+		if configErr == nil && cfg.ProjectsRoot != "" {
+			result.projects, result.configErr = gitops.DiscoverProjects(cfg.ProjectsRoot)
+		}
 		result.account, result.authErr = githubauth.Status()
 		return result
 	}
+}
+
+func (m Model) activePath() string {
+	if m.repo != nil {
+		return m.repo.Root
+	}
+	return ""
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -174,9 +220,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.repo, m.repoErr = msg.repo, msg.repoErr
 		m.account, m.authErr = msg.account, msg.authErr
+		m.projectsRoot, m.projects, m.configErr = msg.projectsRoot, msg.projects, msg.configErr
 		m.branch, m.branches, m.hasOrigin = msg.branch, msg.branches, msg.hasOrigin
 		m.setFiles(msg.files)
 		m.setBranches(msg.branches)
+		m.setProjects(msg.projects)
 		m.updateLog()
 	case operationMsg:
 		m.busy = false
@@ -186,7 +234,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = msg.label
 		}
 		m.mode = modeNormal
-		return m, refreshCmd()
+		return m, loadCmd(m.activePath())
 	case authLoginMsg:
 		m.busy = false
 		if msg.err != nil {
@@ -194,7 +242,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.message = "GitHub login completed"
 		}
-		return m, refreshCmd()
+		return m, loadCmd(m.activePath())
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -219,7 +267,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateLog()
 		case "r":
 			m.busy, m.message = true, "Refreshing…"
-			cmds = append(cmds, refreshCmd())
+			cmds = append(cmds, loadCmd(m.activePath()))
+		case "tab":
+			if m.projectsRoot == "" {
+				m.message = "Root project directory missing — press W to configure it"
+			} else if len(m.projects) == 0 {
+				m.message = "No Git repositories found directly inside the configured root"
+			} else {
+				m.mode = modeProjectSwitch
+			}
+		case "W":
+			root := m.projectsRoot
+			if root == "" && m.repo != nil {
+				root = filepath.Dir(m.repo.Root)
+			}
+			cmds = append(cmds, m.openInput(modeWorkspaceRoot, "Projects root", "Path containing your project folders", root))
 		case "0":
 			if m.account.Authenticated {
 				m.mode = modeLogoutConfirm
@@ -298,6 +360,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	} else if m.mode == modeCheckout {
 		var cmd tea.Cmd
 		m.branchList, cmd = m.branchList.Update(msg)
+		cmds = append(cmds, cmd)
+	} else if m.mode == modeProjectSwitch {
+		var cmd tea.Cmd
+		m.projectList, cmd = m.projectList.Update(msg)
 		cmds = append(cmds, cmd)
 	}
 	return m, tea.Batch(cmds...)
@@ -380,6 +446,28 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 			return m, tea.Batch(cmds...)
 		}
 		m.mode, m.message = modeNormal, "Logout cancelled"
+		return m, tea.Batch(cmds...)
+	case modeWorkspaceRoot:
+		if key.String() == "enter" {
+			root := strings.TrimSpace(m.input.Value())
+			m.input.Blur()
+			m.busy, m.message = true, "Saving projects root…"
+			cmds = append(cmds, operationCmd("Projects root saved — press Tab to switch projects", func() error {
+				return appconfig.SaveProjectsRoot(root)
+			}))
+			return m, tea.Batch(cmds...)
+		}
+	case modeProjectSwitch:
+		if key.String() == "enter" {
+			if item, ok := m.projectList.SelectedItem().(projectItem); ok {
+				m.mode = modeNormal
+				m.busy, m.message = true, "Switching to "+item.project.Name+"…"
+				return m, loadCmd(item.project.Path)
+			}
+		}
+		var cmd tea.Cmd
+		m.projectList, cmd = m.projectList.Update(key)
+		cmds = append(cmds, cmd)
 		return m, tea.Batch(cmds...)
 	case modeCheckout:
 		if key.String() == "enter" {
@@ -464,12 +552,22 @@ func (m *Model) setBranches(branches []string) {
 	m.branchList.SetItems(items)
 }
 
+func (m *Model) setProjects(projects []gitops.Project) {
+	items := make([]list.Item, 0, len(projects))
+	for _, project := range projects {
+		items = append(items, projectItem{project: project})
+	}
+	m.projectList.SetItems(items)
+	m.projectList.Title = fmt.Sprintf("Switch project — %d repositories", len(items))
+}
+
 func (m *Model) resize() {
 	bodyHeight := max(8, m.height-7)
 	leftWidth := max(30, min(54, m.width/2))
 	rightWidth := max(24, m.width-leftWidth-5)
 	m.status.SetSize(leftWidth-4, bodyHeight-2)
 	m.branchList.SetSize(leftWidth-4, bodyHeight-2)
+	m.projectList.SetSize(leftWidth-4, bodyHeight-2)
 	m.log.Width, m.log.Height = rightWidth-4, bodyHeight-2
 	m.input.Width = max(20, m.width-24)
 	m.updateLog()
@@ -489,6 +587,14 @@ func (m *Model) updateLog() {
 			lines = append(lines, errorStyle.Render("Repository error"), m.repoErr.Error())
 		}
 	}
+	if m.projectsRoot == "" {
+		lines = append(lines, "", errorStyle.Render("ROOT PROJECT DIRECTORY MISSING"), "Press W to assign the folder containing your projects.")
+	} else {
+		lines = append(lines, "", "Projects root", dimStyle.Render(m.projectsRoot), fmt.Sprintf("%d Git repositories found • Tab to switch", len(m.projects)))
+	}
+	if m.configErr != nil {
+		lines = append(lines, errorStyle.Render("Workspace error: "+m.configErr.Error()))
+	}
 	if !m.account.Authenticated {
 		lines = append(lines, "")
 		lines = append(lines, errorStyle.Render("GitHub CLI is not connected"), "Press 0 to run gh auth login.")
@@ -497,7 +603,7 @@ func (m *Model) updateLog() {
 		}
 	}
 	if m.showHelp {
-		help, err := glamour.Render("## Daily workflow\n\n- `g` / `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update from origin/master, then origin/main\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `0` log in or log out of GitHub\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `r` refresh\n- `q` quit\n", "dark")
+		help, err := glamour.Render("## Workspace\n\n- `Tab` switch projects\n- `W` set or change projects root\n\n## Daily workflow\n\n- `g` / `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update from origin/master, then origin/main\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `0` log in or log out of GitHub\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `r` refresh\n- `q` quit\n", "dark")
 		if err == nil {
 			lines = append(lines, "", help)
 		}
@@ -519,6 +625,8 @@ func (m Model) View() string {
 	left := m.status.View()
 	if m.mode == modeCheckout {
 		left = m.branchList.View()
+	} else if m.mode == modeProjectSwitch {
+		left = m.projectList.View()
 	}
 	left = panelStyle.Width(leftWidth).Height(bodyHeight).Render(left)
 	right := panelStyle.Width(rightWidth).Height(bodyHeight).Render(m.log.View())
@@ -528,14 +636,14 @@ func (m Model) View() string {
 	if m.busy {
 		footer = m.spinner.View() + " " + footer
 	}
-	if m.mode == modeCommit || m.mode == modeBranchName || m.mode == modeStash || m.mode == modePublishName {
+	if m.mode == modeCommit || m.mode == modeBranchName || m.mode == modeStash || m.mode == modePublishName || m.mode == modeWorkspaceRoot {
 		footer = m.input.View() + "\n" + dimStyle.Render("Enter confirm • Esc cancel")
 	} else if m.mode == modeNormal {
 		primary := "b branch • u update • c commit • p push • P pull request • s/S stash"
 		if !m.hasOrigin {
 			primary = "g publish • " + primary
 		}
-		footer += "\n" + dimStyle.Render(primary+" • 0 account • ? help • q quit")
+		footer += "\n" + dimStyle.Render("Tab projects • W root • "+primary+" • 0 account • ? help • q quit")
 	}
 	return header + "\n" + body + "\n" + footer
 }
@@ -558,11 +666,16 @@ func (m Model) navbar() string {
 	}
 
 	separator := dimStyle.Render(" │ ")
+	root := errorStyle.Render("ROOT PROJECT DIRECTORY MISSING")
+	if m.projectsRoot != "" {
+		root = dimStyle.Render("ROOT ") + accentStyle.Render(filepath.Base(m.projectsRoot))
+	}
 	origin := onlineStyle.Render("ORIGIN ✓")
 	if !m.hasOrigin {
 		origin = errorStyle.Render("ORIGIN MISSING")
 	}
 	nav := titleStyle.Render("github-tui-go") +
+		separator + root +
 		separator + dimStyle.Render("PROJECT ") + accentStyle.Render(project) +
 		separator + dimStyle.Render("BRANCH ") + accentStyle.Render(branch) +
 		separator + origin +

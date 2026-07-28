@@ -31,6 +31,47 @@ type FileStatus struct {
 	Worktree git.StatusCode
 }
 
+type Project struct {
+	Name   string
+	Path   string
+	Branch string
+	Dirty  bool
+}
+
+func DiscoverProjects(root string) ([]Project, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("scan projects root: %w", err)
+	}
+	projects := make([]Project, 0)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+			continue
+		}
+		repo, err := Open(path)
+		if err != nil {
+			continue
+		}
+		branch, branchErr := repo.CurrentBranch()
+		if branchErr != nil {
+			branch = "unknown"
+		}
+		status, statusErr := repo.Status()
+		projects = append(projects, Project{
+			Name:   entry.Name(),
+			Path:   path,
+			Branch: branch,
+			Dirty:  statusErr == nil && len(status) > 0,
+		})
+	}
+	sort.Slice(projects, func(i, j int) bool { return strings.ToLower(projects[i].Name) < strings.ToLower(projects[j].Name) })
+	return projects, nil
+}
+
 func Open(start string) (*Repository, error) {
 	root, err := findRoot(start)
 	if err != nil {
