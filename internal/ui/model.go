@@ -117,28 +117,29 @@ type operationMsg struct {
 type authLoginMsg struct{ err error }
 
 type Model struct {
-	width, height int
-	mode          mode
-	busy          bool
-	repo          *gitops.Repository
-	repoErr       error
-	authErr       error
-	configErr     error
-	account       githubauth.Account
-	branch        string
-	branches      []string
-	hasOrigin     bool
-	projectsRoot  string
-	projects      []gitops.Project
-	status        list.Model
-	branchList    list.Model
-	projectList   list.Model
-	log           viewport.Model
-	input         textinput.Model
-	spinner       spinner.Model
-	publishName   string
-	message       string
-	showHelp      bool
+	width, height  int
+	mode           mode
+	busy           bool
+	repo           *gitops.Repository
+	repoErr        error
+	authErr        error
+	configErr      error
+	account        githubauth.Account
+	branch         string
+	branches       []string
+	hasOrigin      bool
+	projectsRoot   string
+	projects       []gitops.Project
+	status         list.Model
+	branchList     list.Model
+	projectList    list.Model
+	log            viewport.Model
+	input          textinput.Model
+	spinner        spinner.Model
+	publishName    string
+	message        string
+	showHelp       bool
+	refreshPending bool
 }
 
 func New() Model {
@@ -251,24 +252,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = "Switched to " + filepath.Base(m.repo.Root)
 		} else if strings.HasPrefix(m.message, "Loading repository") {
 			m.message = "Ready"
+		} else if m.message == "Refreshing…" {
+			m.message = "Refreshed"
+		}
+		if m.refreshPending {
+			m.message += "  •  views refreshed"
+			m.refreshPending = false
 		}
 		m.updateLog()
 	case operationMsg:
-		m.busy = false
+		m.busy = true
 		if msg.err != nil {
 			m.message = "Error: " + msg.err.Error()
 		} else {
 			m.message = msg.label
 		}
 		m.mode = modeNormal
+		m.refreshPending = true
 		return m, loadCmd(m.activePath())
 	case authLoginMsg:
-		m.busy = false
+		m.busy = true
 		if msg.err != nil {
 			m.message = "GitHub login failed: " + msg.err.Error()
 		} else {
 			m.message = "GitHub login completed"
 		}
+		m.refreshPending = true
 		return m, loadCmd(m.activePath())
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -294,6 +303,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateLog()
 		case "r":
 			m.busy, m.message = true, "Refreshing…"
+			m.refreshPending = true
 			cmds = append(cmds, loadCmd(m.activePath()))
 		case "tab":
 			if m.projectsRoot == "" {
@@ -489,6 +499,7 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 			if item, ok := m.projectList.SelectedItem().(projectItem); ok {
 				m.mode = modeNormal
 				m.busy, m.message = true, "Switching to "+item.project.Name+"…"
+				m.refreshPending = true
 				return m, loadCmd(item.project.Path)
 			}
 		}
