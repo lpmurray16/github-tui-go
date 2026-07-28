@@ -71,3 +71,28 @@ func OpenPRForm(repositoryRoot, branch string) error {
 	}
 	return nil
 }
+
+func PublishRepository(repositoryRoot, name string, public, push bool) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("repository name is required")
+	}
+	visibility := "--private"
+	if public {
+		visibility = "--public"
+	}
+	args := []string{"repo", "create", name, visibility, "--source", repositoryRoot, "--remote", "origin"}
+	if push {
+		args = append(args, "--push")
+	}
+	cmd := exec.Command("gh", args...)
+	cmd.Dir = repositoryRoot
+	if output, err := cmd.CombinedOutput(); err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("publish repository: %s", detail)
+	}
+	return nil
+}

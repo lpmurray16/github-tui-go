@@ -112,6 +112,16 @@ func (r *Repository) Branches() ([]string, error) {
 	return branches, err
 }
 
+func (r *Repository) HasOrigin() bool {
+	_, err := r.Repo.Remote("origin")
+	return err == nil
+}
+
+func (r *Repository) HasCommits() bool {
+	_, err := r.Repo.Head()
+	return err == nil
+}
+
 func (r *Repository) Checkout(branch string) error {
 	wt, err := r.Repo.Worktree()
 	if err != nil {

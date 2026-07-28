@@ -6,6 +6,7 @@ A keyboard-driven Git and GitHub terminal interface built with Go, Bubble Tea, L
 
 - Reuses your existing GitHub CLI login (`gh auth login`)
 - Detects whether the current directory (or a parent) is a Git repository
+- Detects a missing `origin` and publishes the local project to a public or private GitHub repository
 - Shows staged and unstaged status
 - Commits all current changes
 - Pushes the current branch to `origin`
@@ -44,6 +45,7 @@ If GitHub CLI is not authenticated, press `g` in the TUI to launch `gh auth logi
 | Key | Action |
 | --- | --- |
 | `r` | Refresh repository and account status |
+| `G` | Publish the project to GitHub and configure `origin` |
 | `c` | Commit all changes |
 | `p` | Push current branch |
 | `P` | Open GitHub's pull request form for the working branch |

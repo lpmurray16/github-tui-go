@@ -27,6 +27,8 @@ const (
 	modeCommit
 	modeBranchName
 	modeStash
+	modePublishName
+	modePublishConfirm
 	modeCheckout
 	modeDiscardFile
 	modeDiscardAll
@@ -60,13 +62,14 @@ func (i branchItem) Description() string { return "local branch" }
 func (i branchItem) FilterValue() string { return string(i) }
 
 type startupMsg struct {
-	repo     *gitops.Repository
-	files    []gitops.FileStatus
-	branches []string
-	branch   string
-	account  githubauth.Account
-	repoErr  error
-	authErr  error
+	repo      *gitops.Repository
+	files     []gitops.FileStatus
+	branches  []string
+	branch    string
+	hasOrigin bool
+	account   githubauth.Account
+	repoErr   error
+	authErr   error
 }
 
 type operationMsg struct {
@@ -86,11 +89,13 @@ type Model struct {
 	account       githubauth.Account
 	branch        string
 	branches      []string
+	hasOrigin     bool
 	status        list.Model
 	branchList    list.Model
 	log           viewport.Model
 	input         textinput.Model
 	spinner       spinner.Model
+	publishName   string
 	message       string
 	showHelp      bool
 }
@@ -148,6 +153,9 @@ func refreshCmd() tea.Cmd {
 			if result.repoErr == nil {
 				result.branches, result.repoErr = result.repo.Branches()
 			}
+			if result.repoErr == nil {
+				result.hasOrigin = result.repo.HasOrigin()
+			}
 		}
 		result.account, result.authErr = githubauth.Status()
 		return result
@@ -165,7 +173,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.repo, m.repoErr = msg.repo, msg.repoErr
 		m.account, m.authErr = msg.account, msg.authErr
-		m.branch, m.branches = msg.branch, msg.branches
+		m.branch, m.branches, m.hasOrigin = msg.branch, msg.branches, msg.hasOrigin
 		m.setFiles(msg.files)
 		m.setBranches(msg.branches)
 		m.updateLog()
@@ -215,6 +223,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy, m.message = true, "Opening GitHub CLI login…"
 			cmd := exec.Command("gh", "auth", "login")
 			cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg { return authLoginMsg{err: err} }))
+		case "G":
+			if m.requireRepo() {
+				if m.hasOrigin {
+					m.message = "This repository already has an origin remote"
+				} else if !m.account.Authenticated {
+					m.message = "Connect GitHub first with g"
+				} else {
+					name := filepath.Base(m.repo.Root)
+					cmds = append(cmds, m.openInput(modePublishName, "GitHub repository", "owner/repository", name))
+				}
+			}
 		case "c":
 			if m.requireRepo() {
 				cmds = append(cmds, m.openInput(modeCommit, "Commit message", "Describe this commit…", ""))
@@ -315,6 +334,38 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 			cmds = append(cmds, operationCmd("Changes stashed", func() error { return m.repo.Stash(message) }))
 			return m, tea.Batch(cmds...)
 		}
+	case modePublishName:
+		if key.String() == "enter" {
+			m.publishName = strings.TrimSpace(m.input.Value())
+			m.input.Blur()
+			if m.publishName == "" {
+				m.message = "Repository name is required"
+				return m, tea.Batch(cmds...)
+			}
+			m.mode = modePublishConfirm
+			m.message = fmt.Sprintf("Publish %s as PUBLIC? [Y] public • [p] private • Esc cancel", m.publishName)
+			return m, tea.Batch(cmds...)
+		}
+	case modePublishConfirm:
+		public := true
+		switch key.String() {
+		case "p":
+			public = false
+		case "enter", "y", "Y":
+			public = true
+		default:
+			return m, tea.Batch(cmds...)
+		}
+		visibility := "public"
+		if !public {
+			visibility = "private"
+		}
+		push := m.repo.HasCommits()
+		m.busy, m.message = true, fmt.Sprintf("Publishing %s as %s…", m.publishName, visibility)
+		cmds = append(cmds, operationCmd(fmt.Sprintf("Published %s as %s and configured origin", m.publishName, visibility), func() error {
+			return githubauth.PublishRepository(m.repo.Root, m.publishName, public, push)
+		}))
+		return m, tea.Batch(cmds...)
 	case modeCheckout:
 		if key.String() == "enter" {
 			if item, ok := m.branchList.SelectedItem().(branchItem); ok {
@@ -413,6 +464,9 @@ func (m *Model) updateLog() {
 	var lines []string
 	if m.repo != nil {
 		lines = append(lines, titleStyle.Render("Repository"), dimStyle.Render(m.repo.Root))
+		if !m.hasOrigin {
+			lines = append(lines, "", errorStyle.Render("No origin remote configured"), "Press G to publish this project to GitHub.")
+		}
 	} else if m.repoErr != nil {
 		if errors.Is(m.repoErr, git.ErrRepositoryNotExists) {
 			lines = append(lines, errorStyle.Render("Not inside a Git repository"), "", "Change into a Git project and run the app again.")
@@ -428,7 +482,7 @@ func (m *Model) updateLog() {
 		}
 	}
 	if m.showHelp {
-		help, err := glamour.Render("## Daily workflow\n\n- `b` create a branch from master\n- `u` update working branch with origin/master\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `g` connect GitHub CLI\n- `r` refresh\n- `q` quit\n", "dark")
+		help, err := glamour.Render("## Daily workflow\n\n- `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update working branch with origin/master\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `g` connect GitHub CLI\n- `r` refresh\n- `q` quit\n", "dark")
 		if err == nil {
 			lines = append(lines, "", help)
 		}
@@ -459,10 +513,14 @@ func (m Model) View() string {
 	if m.busy {
 		footer = m.spinner.View() + " " + footer
 	}
-	if m.mode == modeCommit || m.mode == modeBranchName || m.mode == modeStash {
+	if m.mode == modeCommit || m.mode == modeBranchName || m.mode == modeStash || m.mode == modePublishName {
 		footer = m.input.View() + "\n" + dimStyle.Render("Enter confirm • Esc cancel")
 	} else if m.mode == modeNormal {
-		footer += "\n" + dimStyle.Render("b branch • u update • c commit • p push • P pull request • s/S stash • ? help • q quit")
+		primary := "b branch • u update • c commit • p push • P pull request • s/S stash"
+		if !m.hasOrigin {
+			primary = "G publish • " + primary
+		}
+		footer += "\n" + dimStyle.Render(primary+" • ? help • q quit")
 	}
 	return header + "\n" + body + "\n" + footer
 }
@@ -485,9 +543,14 @@ func (m Model) navbar() string {
 	}
 
 	separator := dimStyle.Render(" │ ")
+	origin := onlineStyle.Render("ORIGIN ✓")
+	if !m.hasOrigin {
+		origin = errorStyle.Render("ORIGIN MISSING")
+	}
 	nav := titleStyle.Render("github-tui-go") +
 		separator + dimStyle.Render("PROJECT ") + accentStyle.Render(project) +
 		separator + dimStyle.Render("BRANCH ") + accentStyle.Render(branch) +
+		separator + origin +
 		separator + connection + " " + username
 
 	return navbarStyle.Width(max(1, m.width-2)).MaxWidth(max(1, m.width)).Render(nav)
