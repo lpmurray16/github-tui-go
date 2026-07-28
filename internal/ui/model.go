@@ -39,18 +39,30 @@ const (
 )
 
 var (
-	orange      = lipgloss.Color("#ff6b1a")
-	cyan        = lipgloss.Color("#00ffff")
-	green       = lipgloss.Color("#44d17a")
-	dim         = lipgloss.Color("#737373")
-	red         = lipgloss.Color("#ff4057")
-	panelStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#333333")).Padding(0, 1)
-	navbarStyle = lipgloss.NewStyle().Background(lipgloss.Color("#0a0a0a")).Padding(0, 1)
-	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(orange)
-	accentStyle = lipgloss.NewStyle().Bold(true).Foreground(cyan)
-	onlineStyle = lipgloss.NewStyle().Bold(true).Foreground(green)
-	errorStyle  = lipgloss.NewStyle().Foreground(red)
-	dimStyle    = lipgloss.NewStyle().Foreground(dim)
+	black         = lipgloss.Color("#000000")
+	surface       = lipgloss.Color("#070707")
+	orange        = lipgloss.Color("#ff6b1a")
+	orangeMuted   = lipgloss.Color("#6b3214")
+	cyan          = lipgloss.Color("#00ffff")
+	cyanMuted     = lipgloss.Color("#14535b")
+	green         = lipgloss.Color("#44d17a")
+	text          = lipgloss.Color("#d7d7d7")
+	dim           = lipgloss.Color("#737373")
+	red           = lipgloss.Color("#ff4057")
+	baseStyle     = lipgloss.NewStyle().Background(black).Foreground(text)
+	panelStyle    = lipgloss.NewStyle().Background(black).Foreground(text).Border(lipgloss.RoundedBorder()).BorderForeground(orangeMuted).Padding(0, 1)
+	detailStyle   = lipgloss.NewStyle().Background(black).Foreground(text).Border(lipgloss.RoundedBorder()).BorderForeground(cyanMuted).Padding(0, 1)
+	navbarStyle   = lipgloss.NewStyle().Background(surface).Foreground(text).Padding(0, 1).Bold(true)
+	footerStyle   = lipgloss.NewStyle().Background(surface).Foreground(text).Padding(0, 1)
+	activityStyle = lipgloss.NewStyle().Background(black).Foreground(text).PaddingLeft(1)
+	titleStyle    = lipgloss.NewStyle().Bold(true).Foreground(orange)
+	accentStyle   = lipgloss.NewStyle().Bold(true).Foreground(cyan)
+	onlineStyle   = lipgloss.NewStyle().Bold(true).Foreground(green)
+	errorStyle    = lipgloss.NewStyle().Bold(true).Foreground(red)
+	dimStyle      = lipgloss.NewStyle().Foreground(dim)
+	labelStyle    = lipgloss.NewStyle().Foreground(dim).Bold(true)
+	valueStyle    = lipgloss.NewStyle().Foreground(text)
+	keyStyle      = lipgloss.NewStyle().Background(lipgloss.Color("#1b1b1b")).Foreground(cyan).Bold(true).Padding(0, 1)
 )
 
 type fileItem struct{ file gitops.FileStatus }
@@ -67,13 +79,19 @@ func (i branchItem) FilterValue() string { return string(i) }
 
 type projectItem struct{ project gitops.Project }
 
-func (i projectItem) Title() string { return i.project.Name }
+func (i projectItem) Title() string {
+	marker := "✓"
+	if i.project.Dirty {
+		marker = "●"
+	}
+	return marker + "  " + i.project.Name
+}
 func (i projectItem) Description() string {
 	state := "clean"
 	if i.project.Dirty {
 		state = "changed"
 	}
-	return fmt.Sprintf("%s • %s", i.project.Branch, state)
+	return fmt.Sprintf("branch %-18s  %s", i.project.Branch, state)
 }
 func (i projectItem) FilterValue() string { return i.project.Name + " " + i.project.Path }
 
@@ -125,8 +143,12 @@ type Model struct {
 
 func New() Model {
 	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(cyan).BorderLeftForeground(orange)
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(lipgloss.Color("#c8c8c8")).BorderLeftForeground(orange)
+	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.Foreground(text)
+	delegate.Styles.NormalDesc = delegate.Styles.NormalDesc.Foreground(dim)
+	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(orange).Bold(true).BorderLeftForeground(orange)
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(cyan).BorderLeftForeground(orange)
+	delegate.Styles.DimmedTitle = delegate.Styles.DimmedTitle.Foreground(dim)
+	delegate.Styles.DimmedDesc = delegate.Styles.DimmedDesc.Foreground(lipgloss.Color("#444444"))
 
 	status := list.New(nil, delegate, 46, 18)
 	status.Title = "Working tree"
@@ -225,6 +247,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setFiles(msg.files)
 		m.setBranches(msg.branches)
 		m.setProjects(msg.projects)
+		if strings.HasPrefix(m.message, "Switching to ") && m.repo != nil {
+			m.message = "Switched to " + filepath.Base(m.repo.Root)
+		} else if strings.HasPrefix(m.message, "Loading repository") {
+			m.message = "Ready"
+		}
 		m.updateLog()
 	case operationMsg:
 		m.busy = false
@@ -575,33 +602,60 @@ func (m *Model) resize() {
 
 func (m *Model) updateLog() {
 	var lines []string
+	lines = append(lines, sectionTitle("REPOSITORY OVERVIEW"))
+
 	if m.repo != nil {
-		lines = append(lines, titleStyle.Render("Repository"), dimStyle.Render(m.repo.Root))
+		origin := onlineStyle.Render("✓ configured")
 		if !m.hasOrigin {
-			lines = append(lines, "", errorStyle.Render("No origin remote configured"), "Press g to publish this project to GitHub.")
+			origin = errorStyle.Render("● missing")
+		}
+		lines = append(lines,
+			detailRow("PROJECT", filepath.Base(m.repo.Root)),
+			detailRow("BRANCH", m.branch),
+			detailRow("ORIGIN", origin),
+			"",
+			dimStyle.Render(m.repo.Root),
+		)
+		if !m.hasOrigin {
+			lines = append(lines, "", errorStyle.Render("Origin is not configured"), dimStyle.Render("Press g to publish this project to GitHub."))
 		}
 	} else if m.repoErr != nil {
 		if errors.Is(m.repoErr, git.ErrRepositoryNotExists) {
-			lines = append(lines, errorStyle.Render("Not inside a Git repository"), "", "Change into a Git project and run the app again.")
+			lines = append(lines, errorStyle.Render("● NOT A GIT REPOSITORY"), "", dimStyle.Render("Switch projects with Tab or launch inside a Git project."))
 		} else {
-			lines = append(lines, errorStyle.Render("Repository error"), m.repoErr.Error())
+			lines = append(lines, errorStyle.Render("● REPOSITORY ERROR"), dimStyle.Render(m.repoErr.Error()))
 		}
 	}
+
+	lines = append(lines, "", sectionTitle("WORKSPACE"))
 	if m.projectsRoot == "" {
-		lines = append(lines, "", errorStyle.Render("ROOT PROJECT DIRECTORY MISSING"), "Press W to assign the folder containing your projects.")
+		lines = append(lines, errorStyle.Render("● ROOT PROJECT DIRECTORY MISSING"), dimStyle.Render("Press W to assign the folder containing your projects."))
 	} else {
-		lines = append(lines, "", "Projects root", dimStyle.Render(m.projectsRoot), fmt.Sprintf("%d Git repositories found • Tab to switch", len(m.projects)))
+		lines = append(lines,
+			detailRow("ROOT", filepath.Base(m.projectsRoot)),
+			detailRow("PROJECTS", fmt.Sprintf("%d repositories", len(m.projects))),
+			"",
+			dimStyle.Render(m.projectsRoot),
+			dimStyle.Render("Press Tab to search and switch projects."),
+		)
 	}
 	if m.configErr != nil {
 		lines = append(lines, errorStyle.Render("Workspace error: "+m.configErr.Error()))
 	}
-	if !m.account.Authenticated {
-		lines = append(lines, "")
-		lines = append(lines, errorStyle.Render("GitHub CLI is not connected"), "Press 0 to run gh auth login.")
+
+	lines = append(lines, "", sectionTitle("SESSION"))
+	if m.account.Authenticated {
+		lines = append(lines, detailRow("GITHUB", onlineStyle.Render("● @"+m.account.Login)))
+	} else {
+		lines = append(lines, detailRow("GITHUB", errorStyle.Render("● disconnected")), dimStyle.Render("Press 0 to connect with GitHub CLI."))
 		if m.authErr != nil {
 			lines = append(lines, dimStyle.Render(m.authErr.Error()))
 		}
 	}
+	if m.message != "" {
+		lines = append(lines, detailRow("ACTIVITY", m.message))
+	}
+
 	if m.showHelp {
 		help, err := glamour.Render("## Workspace\n\n- `Tab` switch projects\n- `W` set or change projects root\n\n## Daily workflow\n\n- `g` / `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update from origin/master, then origin/main\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `0` log in or log out of GitHub\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `r` refresh\n- `q` quit\n", "dark")
 		if err == nil {
@@ -613,9 +667,17 @@ func (m *Model) updateLog() {
 	m.log.SetContent(strings.Join(lines, "\n"))
 }
 
+func sectionTitle(label string) string {
+	return titleStyle.Render("◆ "+label) + " " + dimStyle.Render(strings.Repeat("─", 18))
+}
+
+func detailRow(label, value string) string {
+	return labelStyle.Width(11).Render(label) + valueStyle.Render(value)
+}
+
 func (m Model) View() string {
 	if m.width == 0 {
-		return "Starting github-tui-go…"
+		return baseStyle.Render("Starting github-tui-go…")
 	}
 	header := m.navbar()
 	bodyHeight := max(8, m.height-7)
@@ -627,25 +689,64 @@ func (m Model) View() string {
 		left = m.branchList.View()
 	} else if m.mode == modeProjectSwitch {
 		left = m.projectList.View()
+	} else if len(m.status.Items()) == 0 {
+		left = m.cleanState(leftWidth-4, bodyHeight-2)
 	}
 	left = panelStyle.Width(leftWidth).Height(bodyHeight).Render(left)
-	right := panelStyle.Width(rightWidth).Height(bodyHeight).Render(m.log.View())
+	right := detailStyle.Width(rightWidth).Height(bodyHeight).Render(m.log.View())
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
 
-	footer := m.message
+	activity := m.message
+	if activity == "" {
+		activity = "Ready"
+	}
 	if m.busy {
-		footer = m.spinner.View() + " " + footer
+		activity = m.spinner.View() + " " + activity
+	} else {
+		activity = accentStyle.Render("›") + " " + activity
 	}
-	if m.mode == modeCommit || m.mode == modeBranchName || m.mode == modeStash || m.mode == modePublishName || m.mode == modeWorkspaceRoot {
-		footer = m.input.View() + "\n" + dimStyle.Render("Enter confirm • Esc cancel")
-	} else if m.mode == modeNormal {
-		primary := "b branch • u update • c commit • p push • P pull request • s/S stash"
-		if !m.hasOrigin {
-			primary = "g publish • " + primary
+	footer := activityStyle.Width(max(1, m.width-2)).Render(activity)
+
+	switch {
+	case m.mode == modeCommit || m.mode == modeBranchName || m.mode == modeStash || m.mode == modePublishName || m.mode == modeWorkspaceRoot:
+		footer += "\n" + footerStyle.Width(max(1, m.width-2)).Render(m.input.View()+"  "+shortcut("Enter", "Confirm")+"  "+shortcut("Esc", "Cancel"))
+	case m.mode == modeProjectSwitch:
+		footer += "\n" + footerStyle.Width(max(1, m.width-2)).Render(shortcut("↑/↓", "Navigate")+"  "+shortcut("Enter", "Switch")+"  "+shortcut("/", "Filter")+"  "+shortcut("Esc", "Cancel"))
+	case m.mode == modeCheckout:
+		footer += "\n" + footerStyle.Width(max(1, m.width-2)).Render(shortcut("↑/↓", "Navigate")+"  "+shortcut("Enter", "Checkout")+"  "+shortcut("Esc", "Cancel"))
+	case m.mode == modeNormal:
+		shortcuts := []string{
+			shortcut("Tab", "Projects"),
+			shortcut("W", "Root"),
+			shortcut("b", "Branch"),
+			shortcut("u", "Update"),
+			shortcut("c", "Commit"),
+			shortcut("p", "Push"),
+			shortcut("P", "PR"),
+			shortcut("?", "Help"),
 		}
-		footer += "\n" + dimStyle.Render("Tab projects • W root • "+primary+" • 0 account • ? help • q quit")
+		if !m.hasOrigin {
+			shortcuts = append([]string{shortcut("g", "Publish")}, shortcuts...)
+		}
+		footer += "\n" + footerStyle.Width(max(1, m.width-2)).Render(strings.Join(shortcuts, "  "))
 	}
-	return header + "\n" + body + "\n" + footer
+
+	screen := header + "\n" + body + "\n" + footer
+	return baseStyle.Width(max(1, m.width)).Height(max(1, m.height)).Render(screen)
+}
+
+func (m Model) cleanState(width, height int) string {
+	title := sectionTitle("WORKING TREE")
+	if m.repo == nil {
+		content := errorStyle.Render("● NO REPOSITORY") + "\n" + dimStyle.Render("Press Tab to select a project")
+		return title + "\n" + lipgloss.NewStyle().Width(width).PaddingTop(max(1, height/3)).Align(lipgloss.Center).Render(content)
+	}
+	content := onlineStyle.Render("✓  CLEAN") + "\n\n" + valueStyle.Render("Nothing to commit") + "\n" + dimStyle.Render("Your working tree is up to date")
+	return title + "\n" + lipgloss.NewStyle().Width(width).PaddingTop(max(1, height/3-2)).Align(lipgloss.Center).Render(content)
+}
+
+func shortcut(key, label string) string {
+	return keyStyle.Render(key) + " " + dimStyle.Render(label)
 }
 
 func (m Model) navbar() string {
@@ -658,28 +759,26 @@ func (m Model) navbar() string {
 		branch = "—"
 	}
 
-	connection := errorStyle.Render("● DISCONNECTED")
-	username := dimStyle.Render("press 0 to connect")
+	root := errorStyle.Render("● ROOT MISSING")
+	if m.projectsRoot != "" {
+		root = labelStyle.Render("ROOT ") + accentStyle.Render(filepath.Base(m.projectsRoot))
+	}
+	origin := errorStyle.Render("● NO ORIGIN")
+	if m.hasOrigin {
+		origin = onlineStyle.Render("✓ ORIGIN")
+	}
+	account := errorStyle.Render("● DISCONNECTED")
 	if m.account.Authenticated {
-		connection = onlineStyle.Render("● CONNECTED")
-		username = accentStyle.Render("@" + m.account.Login)
+		account = onlineStyle.Render("● CONNECTED") + " " + accentStyle.Render("@"+m.account.Login)
 	}
 
-	separator := dimStyle.Render(" │ ")
-	root := errorStyle.Render("ROOT PROJECT DIRECTORY MISSING")
-	if m.projectsRoot != "" {
-		root = dimStyle.Render("ROOT ") + accentStyle.Render(filepath.Base(m.projectsRoot))
-	}
-	origin := onlineStyle.Render("ORIGIN ✓")
-	if !m.hasOrigin {
-		origin = errorStyle.Render("ORIGIN MISSING")
-	}
-	nav := titleStyle.Render("github-tui-go") +
-		separator + root +
-		separator + dimStyle.Render("PROJECT ") + accentStyle.Render(project) +
-		separator + dimStyle.Render("BRANCH ") + accentStyle.Render(branch) +
+	brand := lipgloss.NewStyle().Background(orange).Foreground(black).Bold(true).Padding(0, 1).Render("GITHUB TUI")
+	separator := dimStyle.Render("  │  ")
+	nav := brand + "  " + root +
+		separator + labelStyle.Render("PROJECT ") + titleStyle.Render(project) +
+		separator + labelStyle.Render("BRANCH ") + accentStyle.Render(branch) +
 		separator + origin +
-		separator + connection + " " + username
+		separator + account
 
 	return navbarStyle.Width(max(1, m.width-2)).MaxWidth(max(1, m.width)).Render(nav)
 }
