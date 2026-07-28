@@ -18,12 +18,21 @@ A keyboard-driven Git and GitHub terminal interface built with Go, Bubble Tea, L
 - Stashes tracked/untracked changes and pops the latest stash
 - Checks out existing local branches
 - Discards one selected file or all tracked and untracked changes, with confirmation
+- Runs a first-launch setup wizard that checks Git, GitHub CLI, authentication, and available package managers
 
-## Requirements
+## Requirements for the executable
 
-- Go 1.26.5 or newer
+- Git for Windows (`git`)
 - GitHub CLI (`gh`)
 - An HTTPS `origin` remote for token-authenticated pushes
+
+Go is only required when building the application from source; friends using the `.exe` do not need Go installed.
+
+## First-run setup
+
+On first launch, the setup wizard checks for Git and GitHub CLI and reports the detected paths. If a tool is missing, it prefers winget, falls back to Chocolatey, and otherwise shows the official manual download links. The exact installation command is displayed and requires explicit confirmation before it runs.
+
+The wizard can also launch `gh auth login`. Package installation may require restarting the app before updated `PATH` entries become visible. Press `F1` at any time to reopen setup.
 
 ## Run
 
@@ -68,6 +77,7 @@ Each direct child folder containing a `.git` repository appears in the project s
 | `x` | Discard the selected file |
 | `X` | Discard all changes |
 | `0` | Log in or log out of GitHub |
+| `F1` | Reopen the setup and prerequisite wizard |
 | `?` | Toggle full help |
 | `q` | Quit |
 

@@ -19,6 +19,7 @@ import (
 	"github.com/lpmurray16/github-tui-go/internal/appconfig"
 	"github.com/lpmurray16/github-tui-go/internal/githubauth"
 	"github.com/lpmurray16/github-tui-go/internal/gitops"
+	"github.com/lpmurray16/github-tui-go/internal/preflight"
 )
 
 type mode int
@@ -36,6 +37,8 @@ const (
 	modeCheckout
 	modeDiscardFile
 	modeDiscardAll
+	modeSetup
+	modeSetupInstallConfirm
 )
 
 type refreshScope uint8
@@ -44,7 +47,8 @@ const (
 	refreshRepository refreshScope = 1 << iota
 	refreshWorkspace
 	refreshAccount
-	refreshAll = refreshRepository | refreshWorkspace | refreshAccount
+	refreshTools
+	refreshAll = refreshRepository | refreshWorkspace | refreshAccount | refreshTools
 )
 
 var (
@@ -108,6 +112,7 @@ type startupMsg struct {
 	repositoryLoaded bool
 	workspaceLoaded  bool
 	accountLoaded    bool
+	toolsLoaded      bool
 	repo             *gitops.Repository
 	files            []gitops.FileStatus
 	branches         []string
@@ -119,6 +124,8 @@ type startupMsg struct {
 	repoErr          error
 	authErr          error
 	configErr        error
+	setupComplete    bool
+	tools            preflight.Result
 }
 
 type operationMsg struct {
@@ -128,6 +135,7 @@ type operationMsg struct {
 }
 
 type authLoginMsg struct{ err error }
+type setupInstallMsg struct{ err error }
 
 type Model struct {
 	width, height  int
@@ -153,6 +161,10 @@ type Model struct {
 	message        string
 	showHelp       bool
 	refreshPending bool
+	setupComplete  bool
+	tools          preflight.Result
+	setupRestart   bool
+	setupCommand   string
 }
 
 func New() Model {
@@ -237,6 +249,7 @@ func loadCmd(start string, scope refreshScope) tea.Cmd {
 			cfg, configErr := appconfig.Load()
 			result.configErr = configErr
 			result.projectsRoot = cfg.ProjectsRoot
+			result.setupComplete = cfg.SetupComplete
 			if configErr == nil && cfg.ProjectsRoot != "" {
 				result.projects, result.configErr = gitops.DiscoverProjects(cfg.ProjectsRoot)
 			}
@@ -245,6 +258,11 @@ func loadCmd(start string, scope refreshScope) tea.Cmd {
 		if scope&refreshAccount != 0 {
 			result.accountLoaded = true
 			result.account, result.authErr = githubauth.Status()
+		}
+
+		if scope&refreshTools != 0 {
+			result.toolsLoaded = true
+			result.tools = preflight.Check()
 		}
 		return result
 	}
@@ -275,10 +293,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.workspaceLoaded {
 			m.projectsRoot, m.projects, m.configErr = msg.projectsRoot, msg.projects, msg.configErr
+			m.setupComplete = msg.setupComplete
 			m.setProjects(msg.projects)
 		}
 		if msg.accountLoaded {
 			m.account, m.authErr = msg.account, msg.authErr
+		}
+		if msg.toolsLoaded {
+			m.tools = msg.tools
 		}
 		if strings.HasPrefix(m.message, "Switching to ") && m.repo != nil {
 			m.message = "Switched to " + filepath.Base(m.repo.Root)
@@ -290,6 +312,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.refreshPending {
 			m.message += "  •  views refreshed"
 			m.refreshPending = false
+		}
+		if !m.setupComplete && msg.toolsLoaded && m.mode == modeNormal {
+			m.mode = modeSetup
+			m.message = "Welcome — check the prerequisites below"
 		}
 		m.updateLog()
 	case operationMsg:
@@ -316,6 +342,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshPending = true
 		return m, loadCmd(m.activePath(), refreshAccount)
+	case setupInstallMsg:
+		m.busy = false
+		m.mode = modeSetup
+		m.setupRestart = msg.err == nil
+		if msg.err != nil {
+			m.message = "Installation failed: " + msg.err.Error()
+		} else {
+			m.message = "Installation finished — restart github-tui-go so PATH changes take effect"
+		}
+		m.updateLog()
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -338,6 +374,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "?":
 			m.showHelp = !m.showHelp
 			m.updateLog()
+		case "f1":
+			m.mode = modeSetup
+			m.message = "Setup and prerequisites"
 		case "r":
 			m.busy, m.message = true, "Refreshing active project…"
 			m.refreshPending = true
@@ -535,6 +574,60 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 			}))
 			return m, tea.Batch(cmds...)
 		}
+	case modeSetup:
+		switch key.String() {
+		case "i":
+			cmd, line, err := m.tools.InstallCommand()
+			if err != nil {
+				m.message = err.Error() + " — use the manual download links below"
+				return m, tea.Batch(cmds...)
+			}
+			_ = cmd
+			m.setupCommand = line
+			m.mode = modeSetupInstallConfirm
+			m.message = "Run the displayed installation command? [y/N]"
+			return m, tea.Batch(cmds...)
+		case "a":
+			if !m.toolAvailable("gh") {
+				m.message = "Install GitHub CLI before signing in"
+				return m, tea.Batch(cmds...)
+			}
+			m.busy, m.message = true, "Opening GitHub CLI login…"
+			cmd := exec.Command("gh", "auth", "login")
+			cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg { return authLoginMsg{err: err} }))
+			return m, tea.Batch(cmds...)
+		case "enter", "c":
+			if !m.tools.AllAvailable() || !m.account.Authenticated {
+				m.message = "Install the required tools and connect GitHub, or press s to skip"
+				return m, tea.Batch(cmds...)
+			}
+			m.setupComplete = true
+			m.busy, m.message = true, "Saving setup…"
+			cmds = append(cmds, operationCmd("Setup complete", 0, appconfig.MarkSetupComplete))
+			return m, tea.Batch(cmds...)
+		case "s":
+			m.setupComplete = true
+			m.busy, m.message = true, "Skipping setup…"
+			cmds = append(cmds, operationCmd("Setup skipped — press F1 to reopen it", 0, appconfig.MarkSetupComplete))
+			return m, tea.Batch(cmds...)
+		case "q":
+			return m, tea.Quit
+		}
+		return m, tea.Batch(cmds...)
+	case modeSetupInstallConfirm:
+		if strings.EqualFold(key.String(), "y") {
+			cmd, _, err := m.tools.InstallCommand()
+			if err != nil {
+				m.mode = modeSetup
+				m.message = "Cannot start installer: " + err.Error()
+				return m, tea.Batch(cmds...)
+			}
+			m.busy, m.message = true, "Running installer…"
+			cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg { return setupInstallMsg{err: err} }))
+			return m, tea.Batch(cmds...)
+		}
+		m.mode, m.message = modeSetup, "Installation cancelled"
+		return m, tea.Batch(cmds...)
 	case modeProjectSwitch:
 		if key.String() == "enter" {
 			if item, ok := m.projectList.SelectedItem().(projectItem); ok {
@@ -607,6 +700,15 @@ func (m *Model) requireRepo() bool {
 		return true
 	}
 	m.message = "Run github-tui-go from inside a Git repository"
+	return false
+}
+
+func (m Model) toolAvailable(command string) bool {
+	for _, tool := range m.tools.Tools {
+		if tool.Command == command {
+			return tool.Path != ""
+		}
+	}
 	return false
 }
 
@@ -729,7 +831,7 @@ func (m *Model) updateLog() {
 	}
 
 	if m.showHelp {
-		help, err := glamour.Render("## Workspace\n\n- `Tab` switch projects\n- `W` set or change projects root\n\n## Daily workflow\n\n- `g` / `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update from origin/master, then origin/main\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `0` log in or log out of GitHub\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `r` refresh active project\n- `R` refresh everything\n- `q` quit\n", "dark")
+		help, err := glamour.Render("## Workspace\n\n- `Tab` switch projects\n- `W` set or change projects root\n\n## Daily workflow\n\n- `g` / `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update from origin/master, then origin/main\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `0` log in or log out of GitHub\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `r` refresh active project\n- `R` refresh everything\n- `F1` reopen setup\n- `q` quit\n", "dark")
 		if err == nil {
 			lines = append(lines, "", help)
 		}
@@ -753,6 +855,9 @@ func (m Model) View() string {
 	}
 	header := m.navbar()
 	bodyHeight := max(8, m.height-7)
+	if m.mode == modeSetup || m.mode == modeSetupInstallConfirm {
+		return m.setupScreen(header, bodyHeight)
+	}
 	leftWidth := max(30, min(54, m.width/2))
 	rightWidth := max(24, m.width-leftWidth-5)
 
@@ -808,6 +913,68 @@ func (m Model) View() string {
 	return baseStyle.Width(max(1, m.width)).Height(max(1, m.height)).Render(screen)
 }
 
+func (m Model) setupScreen(header string, bodyHeight int) string {
+	var lines []string
+	lines = append(lines,
+		sectionTitle("FIRST-RUN SETUP"),
+		valueStyle.Render("github-tui-go uses two external tools for its complete workflow."),
+		dimStyle.Render("Nothing is installed without your explicit confirmation."),
+		"",
+		sectionTitle("REQUIRED TOOLS"),
+	)
+	for _, tool := range m.tools.Tools {
+		status := errorStyle.Render("● MISSING")
+		detail := tool.DownloadURL
+		if tool.Path != "" {
+			status = onlineStyle.Render("✓ INSTALLED")
+			detail = tool.Path
+		}
+		lines = append(lines, detailRow(tool.Name, status), dimStyle.Render("             "+detail))
+	}
+
+	lines = append(lines, "", sectionTitle("GITHUB ACCOUNT"))
+	if m.account.Authenticated {
+		lines = append(lines, onlineStyle.Render("✓ CONNECTED  @"+m.account.Login))
+	} else if m.toolAvailable("gh") {
+		lines = append(lines, errorStyle.Render("● NOT CONNECTED"), dimStyle.Render("Press a to launch gh auth login."))
+	} else {
+		lines = append(lines, dimStyle.Render("Install GitHub CLI before connecting your account."))
+	}
+
+	missing := m.tools.Missing()
+	if len(missing) > 0 {
+		lines = append(lines, "", sectionTitle("INSTALLATION"))
+		switch m.tools.Manager {
+		case preflight.ManagerWinget:
+			lines = append(lines, detailRow("MANAGER", accentStyle.Render("winget")), dimStyle.Render("Press i to prepare the missing-tool installation command."))
+		case preflight.ManagerChocolatey:
+			lines = append(lines, detailRow("MANAGER", accentStyle.Render("Chocolatey")), dimStyle.Render("Press i to prepare the missing-tool installation command."))
+		default:
+			lines = append(lines, errorStyle.Render("● NO SUPPORTED PACKAGE MANAGER FOUND"), dimStyle.Render("Install from the official links listed above, then restart the app."))
+		}
+	}
+	if m.mode == modeSetupInstallConfirm {
+		lines = append(lines, "", sectionTitle("CONFIRM COMMAND"), errorStyle.Render("This command will modify software installed on this computer:"), "", accentStyle.Render(m.setupCommand), "", dimStyle.Render("Press y to run it, or any other key to cancel."))
+	}
+	if m.setupRestart {
+		lines = append(lines, "", errorStyle.Render("↻ RESTART REQUIRED"), dimStyle.Render("Close and reopen github-tui-go so newly installed tools are visible in PATH."))
+	}
+	if m.tools.AllAvailable() && m.account.Authenticated {
+		lines = append(lines, "", onlineStyle.Render("✓ ALL PREREQUISITES ARE READY"), dimStyle.Render("Press Enter to complete setup. Configure the projects root afterward with W."))
+	}
+
+	content := strings.Join(lines, "\n")
+	panel := panelStyle.Width(max(30, m.width-4)).Height(bodyHeight).Render(content)
+	activity := activityStyle.Width(max(1, m.width-2)).Render(accentStyle.Render("›") + " " + m.message)
+	controls := shortcut("i", "Install missing") + "  " + shortcut("a", "GitHub login") + "  " + shortcut("Enter", "Complete") + "  " + shortcut("s", "Skip") + "  " + shortcut("q", "Quit")
+	if m.mode == modeSetupInstallConfirm {
+		controls = shortcut("y", "Run command") + "  " + shortcut("any", "Cancel")
+	}
+	footer := footerStyle.Width(max(1, m.width-2)).Render(controls)
+	screen := header + "\n" + panel + "\n" + activity + "\n" + footer
+	return baseStyle.Width(max(1, m.width)).Height(max(1, m.height)).Render(screen)
+}
+
 func (m Model) cleanState(width, height int) string {
 	title := sectionTitle("WORKING TREE")
 	if m.repo == nil {
@@ -844,6 +1011,10 @@ func (m Model) navbar() string {
 	if m.account.Authenticated {
 		account = onlineStyle.Render("● CONNECTED") + " " + accentStyle.Render("@"+m.account.Login)
 	}
+	tools := onlineStyle.Render("✓ TOOLS")
+	if !m.tools.AllAvailable() {
+		tools = errorStyle.Render("● TOOLS MISSING")
+	}
 
 	brand := lipgloss.NewStyle().Background(orange).Foreground(black).Bold(true).Padding(0, 1).Render("GITHUB TUI")
 	separator := dimStyle.Render("  │  ")
@@ -851,6 +1022,7 @@ func (m Model) navbar() string {
 		separator + labelStyle.Render("PROJECT ") + titleStyle.Render(project) +
 		separator + labelStyle.Render("BRANCH ") + accentStyle.Render(branch) +
 		separator + origin +
+		separator + tools +
 		separator + account
 
 	return navbarStyle.Width(max(1, m.width-2)).MaxWidth(max(1, m.width)).Render(nav)

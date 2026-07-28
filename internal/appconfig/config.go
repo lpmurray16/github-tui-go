@@ -10,7 +10,8 @@ import (
 )
 
 type Config struct {
-	ProjectsRoot string `json:"projectsRoot"`
+	ProjectsRoot  string `json:"projectsRoot"`
+	SetupComplete bool   `json:"setupComplete"`
 }
 
 func Load() (Config, error) {
@@ -49,6 +50,24 @@ func SaveProjectsRoot(root string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("projects root is not a directory: %s", absolute)
 	}
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	cfg.ProjectsRoot = absolute
+	return save(cfg)
+}
+
+func MarkSetupComplete() error {
+	cfg, err := Load()
+	if err != nil {
+		return err
+	}
+	cfg.SetupComplete = true
+	return save(cfg)
+}
+
+func save(cfg Config) error {
 	path, err := configPath()
 	if err != nil {
 		return err
@@ -56,7 +75,7 @@ func SaveProjectsRoot(root string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
-	contents, err := json.MarshalIndent(Config{ProjectsRoot: absolute}, "", "  ")
+	contents, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)
 	}
