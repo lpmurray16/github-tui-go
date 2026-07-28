@@ -13,7 +13,7 @@ A keyboard-driven Git and GitHub terminal interface built with Go, Bubble Tea, L
 - Pushes the current branch to `origin`
 - Fetches the latest `master`, then creates and checks out a working branch from it
 - Updates the working branch from `origin/master`, falling back to `origin/main`
-- Automatically refreshes repository status, branch/origin details, dashboard data, and workspace project markers after repository-changing actions
+- Automatically refreshes only the affected repository, workspace, or account state after actions, avoiding unnecessary sibling-project scans and GitHub API calls
 - Opens GitHub's pull request form in your browser for final review
 - Stashes tracked/untracked changes and pops the latest stash
 - Checks out existing local branches
@@ -52,7 +52,8 @@ Each direct child folder containing a `.git` repository appears in the project s
 
 | Key | Action |
 | --- | --- |
-| `r` | Refresh repository and account status |
+| `r` | Quickly refresh the active repository |
+| `R` | Fully rescan the repository, workspace projects, and GitHub account |
 | `Tab` | Open the searchable project switcher |
 | `W` | Set or change the projects-root directory |
 | `g` / `G` | Publish the project to GitHub and configure `origin` |

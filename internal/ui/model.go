@@ -38,6 +38,15 @@ const (
 	modeDiscardAll
 )
 
+type refreshScope uint8
+
+const (
+	refreshRepository refreshScope = 1 << iota
+	refreshWorkspace
+	refreshAccount
+	refreshAll = refreshRepository | refreshWorkspace | refreshAccount
+)
+
 var (
 	black         = lipgloss.Color("#000000")
 	surface       = lipgloss.Color("#070707")
@@ -96,22 +105,26 @@ func (i projectItem) Description() string {
 func (i projectItem) FilterValue() string { return i.project.Name + " " + i.project.Path }
 
 type startupMsg struct {
-	repo         *gitops.Repository
-	files        []gitops.FileStatus
-	branches     []string
-	branch       string
-	hasOrigin    bool
-	projectsRoot string
-	projects     []gitops.Project
-	account      githubauth.Account
-	repoErr      error
-	authErr      error
-	configErr    error
+	repositoryLoaded bool
+	workspaceLoaded  bool
+	accountLoaded    bool
+	repo             *gitops.Repository
+	files            []gitops.FileStatus
+	branches         []string
+	branch           string
+	hasOrigin        bool
+	projectsRoot     string
+	projects         []gitops.Project
+	account          githubauth.Account
+	repoErr          error
+	authErr          error
+	configErr        error
 }
 
 type operationMsg struct {
-	label string
-	err   error
+	label   string
+	err     error
+	refresh refreshScope
 }
 
 type authLoginMsg struct{ err error }
@@ -185,42 +198,54 @@ func New() Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(loadCmd(""), m.spinner.Tick)
+	return tea.Batch(loadCmd("", refreshAll), m.spinner.Tick)
 }
 
-func loadCmd(start string) tea.Cmd {
+func loadCmd(start string, scope refreshScope) tea.Cmd {
 	return func() tea.Msg {
 		result := startupMsg{}
-		if start == "" {
-			cwd, err := os.Getwd()
-			if err != nil {
-				result.repoErr = err
-			} else {
-				start = cwd
-			}
-		}
-		if result.repoErr == nil {
-			result.repo, result.repoErr = gitops.Open(start)
-		}
-		if result.repoErr == nil {
-			result.files, result.repoErr = result.repo.Status()
-			if result.repoErr == nil {
-				result.branch, result.repoErr = result.repo.CurrentBranch()
+
+		if scope&refreshRepository != 0 {
+			result.repositoryLoaded = true
+			if start == "" {
+				cwd, err := os.Getwd()
+				if err != nil {
+					result.repoErr = err
+				} else {
+					start = cwd
+				}
 			}
 			if result.repoErr == nil {
-				result.branches, result.repoErr = result.repo.Branches()
+				result.repo, result.repoErr = gitops.Open(start)
 			}
 			if result.repoErr == nil {
-				result.hasOrigin = result.repo.HasOrigin()
+				result.files, result.repoErr = result.repo.Status()
+				if result.repoErr == nil {
+					result.branch, result.repoErr = result.repo.CurrentBranch()
+				}
+				if result.repoErr == nil {
+					result.branches, result.repoErr = result.repo.Branches()
+				}
+				if result.repoErr == nil {
+					result.hasOrigin = result.repo.HasOrigin()
+				}
 			}
 		}
-		cfg, configErr := appconfig.Load()
-		result.configErr = configErr
-		result.projectsRoot = cfg.ProjectsRoot
-		if configErr == nil && cfg.ProjectsRoot != "" {
-			result.projects, result.configErr = gitops.DiscoverProjects(cfg.ProjectsRoot)
+
+		if scope&refreshWorkspace != 0 {
+			result.workspaceLoaded = true
+			cfg, configErr := appconfig.Load()
+			result.configErr = configErr
+			result.projectsRoot = cfg.ProjectsRoot
+			if configErr == nil && cfg.ProjectsRoot != "" {
+				result.projects, result.configErr = gitops.DiscoverProjects(cfg.ProjectsRoot)
+			}
 		}
-		result.account, result.authErr = githubauth.Status()
+
+		if scope&refreshAccount != 0 {
+			result.accountLoaded = true
+			result.account, result.authErr = githubauth.Status()
+		}
 		return result
 	}
 }
@@ -241,18 +266,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resize()
 	case startupMsg:
 		m.busy = false
-		m.repo, m.repoErr = msg.repo, msg.repoErr
-		m.account, m.authErr = msg.account, msg.authErr
-		m.projectsRoot, m.projects, m.configErr = msg.projectsRoot, msg.projects, msg.configErr
-		m.branch, m.branches, m.hasOrigin = msg.branch, msg.branches, msg.hasOrigin
-		m.setFiles(msg.files)
-		m.setBranches(msg.branches)
-		m.setProjects(msg.projects)
+		if msg.repositoryLoaded {
+			m.repo, m.repoErr = msg.repo, msg.repoErr
+			m.branch, m.branches, m.hasOrigin = msg.branch, msg.branches, msg.hasOrigin
+			m.setFiles(msg.files)
+			m.setBranches(msg.branches)
+			m.updateActiveProject(msg.files)
+		}
+		if msg.workspaceLoaded {
+			m.projectsRoot, m.projects, m.configErr = msg.projectsRoot, msg.projects, msg.configErr
+			m.setProjects(msg.projects)
+		}
+		if msg.accountLoaded {
+			m.account, m.authErr = msg.account, msg.authErr
+		}
 		if strings.HasPrefix(m.message, "Switching to ") && m.repo != nil {
 			m.message = "Switched to " + filepath.Base(m.repo.Root)
 		} else if strings.HasPrefix(m.message, "Loading repository") {
 			m.message = "Ready"
-		} else if m.message == "Refreshing…" {
+		} else if strings.HasPrefix(m.message, "Refreshing ") {
 			m.message = "Refreshed"
 		}
 		if m.refreshPending {
@@ -261,15 +293,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.updateLog()
 	case operationMsg:
-		m.busy = true
 		if msg.err != nil {
 			m.message = "Error: " + msg.err.Error()
 		} else {
 			m.message = msg.label
 		}
 		m.mode = modeNormal
+		if msg.refresh == 0 {
+			m.busy = false
+			m.updateLog()
+			return m, nil
+		}
+		m.busy = true
 		m.refreshPending = true
-		return m, loadCmd(m.activePath())
+		return m, loadCmd(m.activePath(), msg.refresh)
 	case authLoginMsg:
 		m.busy = true
 		if msg.err != nil {
@@ -278,7 +315,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = "GitHub login completed"
 		}
 		m.refreshPending = true
-		return m, loadCmd(m.activePath())
+		return m, loadCmd(m.activePath(), refreshAccount)
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -302,9 +339,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = !m.showHelp
 			m.updateLog()
 		case "r":
-			m.busy, m.message = true, "Refreshing…"
+			m.busy, m.message = true, "Refreshing active project…"
 			m.refreshPending = true
-			cmds = append(cmds, loadCmd(m.activePath()))
+			cmds = append(cmds, loadCmd(m.activePath(), refreshRepository))
+		case "R":
+			m.busy, m.message = true, "Refreshing project, workspace, and account…"
+			m.refreshPending = true
+			cmds = append(cmds, loadCmd(m.activePath(), refreshAll))
 		case "tab":
 			if m.projectsRoot == "" {
 				m.message = "Root project directory missing — press W to configure it"
@@ -346,12 +387,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "p":
 			if m.requireRepo() {
 				m.busy, m.message = true, "Pushing "+m.branch+"…"
-				cmds = append(cmds, operationCmd("Pushed "+m.branch+" to origin", m.repo.Push))
+				cmds = append(cmds, operationCmd("Pushed "+m.branch+" to origin", refreshRepository, m.repo.Push))
 			}
 		case "P":
 			if m.requireRepo() {
 				m.busy, m.message = true, "Opening GitHub pull request form…"
-				cmds = append(cmds, operationCmd("Opened pull request form in your browser", func() error {
+				cmds = append(cmds, operationCmd("Opened pull request form in your browser", 0, func() error {
 					return githubauth.OpenPRForm(m.repo.Root, m.branch)
 				}))
 			}
@@ -362,7 +403,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "u":
 			if m.requireRepo() {
 				m.busy, m.message = true, "Updating from origin/master, then origin/main if needed…"
-				cmds = append(cmds, operationCmd("Current branch updated from the remote base branch", m.repo.UpdateFromPrimaryBranch))
+				cmds = append(cmds, operationCmd("Current branch updated from the remote base branch", refreshRepository, m.repo.UpdateFromPrimaryBranch))
 			}
 		case "s":
 			if m.requireRepo() {
@@ -371,7 +412,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "S":
 			if m.requireRepo() {
 				m.busy, m.message = true, "Popping latest stash…"
-				cmds = append(cmds, operationCmd("Latest stash applied", m.repo.PopStash))
+				cmds = append(cmds, operationCmd("Latest stash applied", refreshRepository, m.repo.PopStash))
 			}
 		case "o":
 			if m.requireRepo() {
@@ -421,7 +462,7 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 			m.input.Blur()
 			m.busy, m.message = true, "Committing all changes…"
 			login := m.account.Login
-			cmds = append(cmds, operationCmd("Commit created", func() error {
+			cmds = append(cmds, operationCmd("Commit created", refreshRepository, func() error {
 				_, err := m.repo.CommitAll(message, login)
 				return err
 			}))
@@ -432,7 +473,7 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 			name := strings.TrimSpace(m.input.Value())
 			m.input.Blur()
 			m.busy, m.message = true, fmt.Sprintf("Creating %s from master…", name)
-			cmds = append(cmds, operationCmd(fmt.Sprintf("Created %s from the latest master", name), func() error { return m.repo.CreateBranchFromMaster(name) }))
+			cmds = append(cmds, operationCmd(fmt.Sprintf("Created %s from the latest master", name), refreshRepository, func() error { return m.repo.CreateBranchFromMaster(name) }))
 			return m, tea.Batch(cmds...)
 		}
 	case modeStash:
@@ -440,7 +481,7 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 			message := m.input.Value()
 			m.input.Blur()
 			m.busy, m.message = true, "Stashing tracked and untracked changes…"
-			cmds = append(cmds, operationCmd("Changes stashed", func() error { return m.repo.Stash(message) }))
+			cmds = append(cmds, operationCmd("Changes stashed", refreshRepository, func() error { return m.repo.Stash(message) }))
 			return m, tea.Batch(cmds...)
 		}
 	case modePublishName:
@@ -471,7 +512,7 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 		}
 		push := m.repo.HasCommits()
 		m.busy, m.message = true, fmt.Sprintf("Publishing %s as %s…", m.publishName, visibility)
-		cmds = append(cmds, operationCmd(fmt.Sprintf("Published %s as %s and configured origin", m.publishName, visibility), func() error {
+		cmds = append(cmds, operationCmd(fmt.Sprintf("Published %s as %s and configured origin", m.publishName, visibility), refreshRepository, func() error {
 			return githubauth.PublishRepository(m.repo.Root, m.publishName, public, push)
 		}))
 		return m, tea.Batch(cmds...)
@@ -479,7 +520,7 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 		if strings.EqualFold(key.String(), "y") {
 			login := m.account.Login
 			m.busy, m.message = true, "Logging out of GitHub…"
-			cmds = append(cmds, operationCmd("Logged out of GitHub", func() error { return githubauth.Logout(login) }))
+			cmds = append(cmds, operationCmd("Logged out of GitHub", refreshAccount, func() error { return githubauth.Logout(login) }))
 			return m, tea.Batch(cmds...)
 		}
 		m.mode, m.message = modeNormal, "Logout cancelled"
@@ -489,7 +530,7 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 			root := strings.TrimSpace(m.input.Value())
 			m.input.Blur()
 			m.busy, m.message = true, "Saving projects root…"
-			cmds = append(cmds, operationCmd("Projects root saved — press Tab to switch projects", func() error {
+			cmds = append(cmds, operationCmd("Projects root saved — press Tab to switch projects", refreshWorkspace, func() error {
 				return appconfig.SaveProjectsRoot(root)
 			}))
 			return m, tea.Batch(cmds...)
@@ -500,7 +541,7 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 				m.mode = modeNormal
 				m.busy, m.message = true, "Switching to "+item.project.Name+"…"
 				m.refreshPending = true
-				return m, loadCmd(item.project.Path)
+				return m, loadCmd(item.project.Path, refreshRepository)
 			}
 		}
 		var cmd tea.Cmd
@@ -512,7 +553,7 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 			if item, ok := m.branchList.SelectedItem().(branchItem); ok {
 				branch := string(item)
 				m.busy, m.message = true, "Checking out "+branch+"…"
-				cmds = append(cmds, operationCmd("Checked out "+branch, func() error { return m.repo.Checkout(branch) }))
+				cmds = append(cmds, operationCmd("Checked out "+branch, refreshRepository, func() error { return m.repo.Checkout(branch) }))
 				return m, tea.Batch(cmds...)
 			}
 		}
@@ -525,7 +566,7 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 			if item, ok := m.status.SelectedItem().(fileItem); ok {
 				path := item.file.Path
 				m.busy, m.message = true, "Discarding "+path+"…"
-				cmds = append(cmds, operationCmd("Discarded changes to "+path, func() error { return m.repo.DiscardFile(path) }))
+				cmds = append(cmds, operationCmd("Discarded changes to "+path, refreshRepository, func() error { return m.repo.DiscardFile(path) }))
 				return m, tea.Batch(cmds...)
 			}
 		}
@@ -534,7 +575,7 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 	case modeDiscardAll:
 		if strings.EqualFold(key.String(), "y") {
 			m.busy, m.message = true, "Discarding all changes…"
-			cmds = append(cmds, operationCmd("Discarded all changes", m.repo.DiscardAll))
+			cmds = append(cmds, operationCmd("Discarded all changes", refreshRepository, m.repo.DiscardAll))
 			return m, tea.Batch(cmds...)
 		}
 		m.mode, m.message = modeNormal, "Discard cancelled"
@@ -547,8 +588,8 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 	return m, tea.Batch(cmds...)
 }
 
-func operationCmd(label string, fn func() error) tea.Cmd {
-	return func() tea.Msg { return operationMsg{label: label, err: fn()} }
+func operationCmd(label string, refresh refreshScope, fn func() error) tea.Cmd {
+	return func() tea.Msg { return operationMsg{label: label, err: fn(), refresh: refresh} }
 }
 
 func (m *Model) openInput(next mode, prompt, placeholder, value string) tea.Cmd {
@@ -597,6 +638,26 @@ func (m *Model) setProjects(projects []gitops.Project) {
 	}
 	m.projectList.SetItems(items)
 	m.projectList.Title = fmt.Sprintf("Switch project — %d repositories", len(items))
+}
+
+func (m *Model) updateActiveProject(files []gitops.FileStatus) {
+	if m.repo == nil {
+		return
+	}
+	activePath := filepath.Clean(m.repo.Root)
+	changed := false
+	for index := range m.projects {
+		if !strings.EqualFold(filepath.Clean(m.projects[index].Path), activePath) {
+			continue
+		}
+		m.projects[index].Branch = m.branch
+		m.projects[index].Dirty = len(files) > 0
+		changed = true
+		break
+	}
+	if changed {
+		m.setProjects(m.projects)
+	}
 }
 
 func (m *Model) resize() {
@@ -668,7 +729,7 @@ func (m *Model) updateLog() {
 	}
 
 	if m.showHelp {
-		help, err := glamour.Render("## Workspace\n\n- `Tab` switch projects\n- `W` set or change projects root\n\n## Daily workflow\n\n- `g` / `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update from origin/master, then origin/main\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `0` log in or log out of GitHub\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `r` refresh\n- `q` quit\n", "dark")
+		help, err := glamour.Render("## Workspace\n\n- `Tab` switch projects\n- `W` set or change projects root\n\n## Daily workflow\n\n- `g` / `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update from origin/master, then origin/main\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `0` log in or log out of GitHub\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `r` refresh active project\n- `R` refresh everything\n- `q` quit\n", "dark")
 		if err == nil {
 			lines = append(lines, "", help)
 		}
@@ -734,6 +795,7 @@ func (m Model) View() string {
 			shortcut("c", "Commit"),
 			shortcut("p", "Push"),
 			shortcut("P", "PR"),
+			shortcut("r", "Refresh"),
 			shortcut("?", "Help"),
 		}
 		if !m.hasOrigin {
