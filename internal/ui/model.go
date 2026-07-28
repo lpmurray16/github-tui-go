@@ -29,6 +29,7 @@ const (
 	modeStash
 	modePublishName
 	modePublishConfirm
+	modeLogoutConfirm
 	modeCheckout
 	modeDiscardFile
 	modeDiscardAll
@@ -219,16 +220,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			m.busy, m.message = true, "Refreshing…"
 			cmds = append(cmds, refreshCmd())
-		case "g":
-			m.busy, m.message = true, "Opening GitHub CLI login…"
-			cmd := exec.Command("gh", "auth", "login")
-			cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg { return authLoginMsg{err: err} }))
-		case "G":
+		case "0":
+			if m.account.Authenticated {
+				m.mode = modeLogoutConfirm
+				m.message = fmt.Sprintf("Log out of GitHub as @%s? [y/N]", m.account.Login)
+			} else {
+				m.busy, m.message = true, "Opening GitHub CLI login…"
+				cmd := exec.Command("gh", "auth", "login")
+				cmds = append(cmds, tea.ExecProcess(cmd, func(err error) tea.Msg { return authLoginMsg{err: err} }))
+			}
+		case "g", "G":
 			if m.requireRepo() {
 				if m.hasOrigin {
 					m.message = "This repository already has an origin remote"
 				} else if !m.account.Authenticated {
-					m.message = "Connect GitHub first with g"
+					m.message = "Connect GitHub first with 0"
 				} else {
 					name := filepath.Base(m.repo.Root)
 					cmds = append(cmds, m.openInput(modePublishName, "GitHub repository", "owner/repository", name))
@@ -366,6 +372,15 @@ func (m Model) updateModal(key tea.KeyMsg, cmds []tea.Cmd) (tea.Model, tea.Cmd) 
 			return githubauth.PublishRepository(m.repo.Root, m.publishName, public, push)
 		}))
 		return m, tea.Batch(cmds...)
+	case modeLogoutConfirm:
+		if strings.EqualFold(key.String(), "y") {
+			login := m.account.Login
+			m.busy, m.message = true, "Logging out of GitHub…"
+			cmds = append(cmds, operationCmd("Logged out of GitHub", func() error { return githubauth.Logout(login) }))
+			return m, tea.Batch(cmds...)
+		}
+		m.mode, m.message = modeNormal, "Logout cancelled"
+		return m, tea.Batch(cmds...)
 	case modeCheckout:
 		if key.String() == "enter" {
 			if item, ok := m.branchList.SelectedItem().(branchItem); ok {
@@ -465,7 +480,7 @@ func (m *Model) updateLog() {
 	if m.repo != nil {
 		lines = append(lines, titleStyle.Render("Repository"), dimStyle.Render(m.repo.Root))
 		if !m.hasOrigin {
-			lines = append(lines, "", errorStyle.Render("No origin remote configured"), "Press G to publish this project to GitHub.")
+			lines = append(lines, "", errorStyle.Render("No origin remote configured"), "Press g to publish this project to GitHub.")
 		}
 	} else if m.repoErr != nil {
 		if errors.Is(m.repoErr, git.ErrRepositoryNotExists) {
@@ -476,13 +491,13 @@ func (m *Model) updateLog() {
 	}
 	if !m.account.Authenticated {
 		lines = append(lines, "")
-		lines = append(lines, errorStyle.Render("GitHub CLI is not connected"), "Press g to run gh auth login.")
+		lines = append(lines, errorStyle.Render("GitHub CLI is not connected"), "Press 0 to run gh auth login.")
 		if m.authErr != nil {
 			lines = append(lines, dimStyle.Render(m.authErr.Error()))
 		}
 	}
 	if m.showHelp {
-		help, err := glamour.Render("## Daily workflow\n\n- `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update working branch with origin/master\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `g` connect GitHub CLI\n- `r` refresh\n- `q` quit\n", "dark")
+		help, err := glamour.Render("## Daily workflow\n\n- `g` / `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update working branch with origin/master\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `0` log in or log out of GitHub\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `r` refresh\n- `q` quit\n", "dark")
 		if err == nil {
 			lines = append(lines, "", help)
 		}
@@ -518,9 +533,9 @@ func (m Model) View() string {
 	} else if m.mode == modeNormal {
 		primary := "b branch • u update • c commit • p push • P pull request • s/S stash"
 		if !m.hasOrigin {
-			primary = "G publish • " + primary
+			primary = "g publish • " + primary
 		}
-		footer += "\n" + dimStyle.Render(primary+" • ? help • q quit")
+		footer += "\n" + dimStyle.Render(primary+" • 0 account • ? help • q quit")
 	}
 	return header + "\n" + body + "\n" + footer
 }
@@ -536,7 +551,7 @@ func (m Model) navbar() string {
 	}
 
 	connection := errorStyle.Render("● DISCONNECTED")
-	username := dimStyle.Render("press g to connect")
+	username := dimStyle.Render("press 0 to connect")
 	if m.account.Authenticated {
 		connection = onlineStyle.Render("● CONNECTED")
 		username = accentStyle.Render("@" + m.account.Login)

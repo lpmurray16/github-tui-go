@@ -96,3 +96,19 @@ func PublishRepository(repositoryRoot, name string, public, push bool) error {
 	}
 	return nil
 }
+
+func Logout(login string) error {
+	login = strings.TrimSpace(login)
+	if login == "" {
+		return fmt.Errorf("GitHub username is required to log out")
+	}
+	cmd := exec.Command("gh", "auth", "logout", "--hostname", "github.com", "--user", login)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return fmt.Errorf("GitHub logout: %s", detail)
+	}
+	return nil
+}

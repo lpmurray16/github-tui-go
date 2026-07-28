@@ -45,7 +45,7 @@ If GitHub CLI is not authenticated, press `g` in the TUI to launch `gh auth logi
 | Key | Action |
 | --- | --- |
 | `r` | Refresh repository and account status |
-| `G` | Publish the project to GitHub and configure `origin` |
+| `g` / `G` | Publish the project to GitHub and configure `origin` |
 | `c` | Commit all changes |
 | `p` | Push current branch |
 | `P` | Open GitHub's pull request form for the working branch |
@@ -56,7 +56,7 @@ If GitHub CLI is not authenticated, press `g` in the TUI to launch `gh auth logi
 | `o` | Open branch checkout picker |
 | `x` | Discard the selected file |
 | `X` | Discard all changes |
-| `g` | Run GitHub CLI login |
+| `0` | Log in or log out of GitHub |
 | `?` | Toggle full help |
 | `q` | Quit |
 
