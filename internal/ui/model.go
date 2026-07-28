@@ -262,8 +262,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "u":
 			if m.requireRepo() {
-				m.busy, m.message = true, "Fetching and merging origin/master…"
-				cmds = append(cmds, operationCmd("Current branch updated with origin/master", m.repo.UpdateFromMaster))
+				m.busy, m.message = true, "Updating from origin/master, then origin/main if needed…"
+				cmds = append(cmds, operationCmd("Current branch updated from the remote base branch", m.repo.UpdateFromPrimaryBranch))
 			}
 		case "s":
 			if m.requireRepo() {
@@ -497,7 +497,7 @@ func (m *Model) updateLog() {
 		}
 	}
 	if m.showHelp {
-		help, err := glamour.Render("## Daily workflow\n\n- `g` / `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update working branch with origin/master\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `0` log in or log out of GitHub\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `r` refresh\n- `q` quit\n", "dark")
+		help, err := glamour.Render("## Daily workflow\n\n- `g` / `G` publish project when origin is missing\n- `b` create a branch from master\n- `u` update from origin/master, then origin/main\n- `c` commit all changes\n- `p` push current branch\n- `P` open GitHub pull request form\n- `s` stash changes\n- `S` pop latest stash\n\n## Other\n\n- `0` log in or log out of GitHub\n- `o` checkout local branch\n- `x` discard selected file\n- `X` discard all changes\n- `r` refresh\n- `q` quit\n", "dark")
 		if err == nil {
 			lines = append(lines, "", help)
 		}

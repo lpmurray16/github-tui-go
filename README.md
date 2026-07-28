@@ -11,7 +11,7 @@ A keyboard-driven Git and GitHub terminal interface built with Go, Bubble Tea, L
 - Commits all current changes
 - Pushes the current branch to `origin`
 - Fetches the latest `master`, then creates and checks out a working branch from it
-- Updates the working branch by fetching and merging `origin/master`
+- Updates the working branch from `origin/master`, falling back to `origin/main`
 - Opens GitHub's pull request form in your browser for final review
 - Stashes tracked/untracked changes and pops the latest stash
 - Checks out existing local branches
@@ -50,7 +50,7 @@ If GitHub CLI is not authenticated, press `g` in the TUI to launch `gh auth logi
 | `p` | Push current branch |
 | `P` | Open GitHub's pull request form for the working branch |
 | `b` | Create a branch from the latest `master` |
-| `u` | Fetch and merge `origin/master` into the working branch |
+| `u` | Update from `origin/master`, falling back to `origin/main` |
 | `s` | Stash tracked and untracked changes |
 | `S` | Pop the latest stash |
 | `o` | Open branch checkout picker |

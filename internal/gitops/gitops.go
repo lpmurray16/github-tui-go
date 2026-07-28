@@ -227,24 +227,32 @@ func (r *Repository) Push() error {
 	return err
 }
 
-func (r *Repository) UpdateFromMaster() error {
+func (r *Repository) UpdateFromPrimaryBranch() error {
 	branch, err := r.CurrentBranch()
 	if err != nil {
 		return err
 	}
-	if branch == "master" {
-		return fmt.Errorf("already on master; switch to a working branch first")
-	}
 	if strings.Contains(branch, "detached") {
 		return fmt.Errorf("cannot update a detached HEAD")
 	}
-	if err := r.runGit("fetch", "origin", "master"); err != nil {
-		return fmt.Errorf("fetch master: %w", err)
+
+	masterErr := r.runGit("fetch", "origin", "master")
+	if masterErr == nil {
+		if err := r.runGit("merge", "origin/master", "--no-edit"); err != nil {
+			return fmt.Errorf("fetched master, but merge origin/master failed: %w", err)
+		}
+		return nil
 	}
-	if err := r.runGit("merge", "origin/master", "--no-edit"); err != nil {
-		return fmt.Errorf("merge origin/master: %w", err)
+
+	mainErr := r.runGit("fetch", "origin", "main")
+	if mainErr == nil {
+		if err := r.runGit("merge", "origin/main", "--no-edit"); err != nil {
+			return fmt.Errorf("master was unavailable; fetched main, but merge origin/main failed: %w", err)
+		}
+		return nil
 	}
-	return nil
+
+	return fmt.Errorf("could not update from either remote base branch; master failed: %v; main failed: %v", masterErr, mainErr)
 }
 
 func (r *Repository) Stash(message string) error {
